@@ -1,0 +1,23 @@
+# 构建产物
+dist/
+
+# 测试与开发输出
+testdata/*.png
+!testdata/pretty-src.png
+
+# 依赖 (本项目零依赖, 这里只是保险)
+node_modules/
+package-lock.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.log
+*.tmp
+_*.js
+_*.json

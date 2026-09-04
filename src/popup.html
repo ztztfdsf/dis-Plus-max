@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MoeGuard 喵图混淆</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    width: 250px; margin: 0; padding: 14px 16px 16px;
+    background: linear-gradient(160deg, #1c1630, #241a38);
+    color: #e8e2f5; font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 14px; margin: 0 0 2px; color: #ffb7e2; }
+  .ver { font-size: 9px; color: #7d7296; margin: 0 0 8px; }
+  .sub { font-size: 10px; color: #9c93b1; margin-bottom: 12px; }
+  .row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0; font-size: 12px; }
+  input[type=checkbox] { width: 15px; height: 15px; accent-color: #ff7cb8; }
+  button {
+    width: 100%; border: none; border-radius: 8px; padding: 7px 0; margin-top: 6px;
+    font-size: 12px; font-weight: 600; cursor: pointer;
+  }
+  .primary { background: #5865f2; color: #fff; }
+  .ghost { background: #332c4d; color: #cfc6e8; }
+  .status { font-size: 10px; color: #7fe0a6; margin-top: 8px; min-height: 12px; }
+</style>
+</head>
+<body>
+  <h1>🌸 MoeGuard 喵图混淆</h1>
+  <div class="sub">上传自动加密 · 装插件才能看原图 · 无需密钥</div>
+  <div class="ver">v<span id="ver">3.6.1</span> <span id="attachSt"></span></div>
+  <div class="row"><span>🛡 上传图片自动混淆</span><input type="checkbox" id="t-enabled"></div>
+  <div class="row"><span>👁 自动解码消息喵图</span><input type="checkbox" id="t-autoDecode"></div>
+  <div class="row"><span>🏷 显示角标</span><input type="checkbox" id="t-badge"></div>
+  <div class="row"><span>🔍 只混淆色情图片</span><input type="checkbox" id="t-nsfwOnly"></div>
+  <div style="font-size:9.5px;color:#8d84a6;line-height:1.6;margin:2px 0 6px;">关闭 = 所有图都混淆（默认）。开启后所有图过一遍本地检测，仅高分图混淆。</div>
+  <button class="primary" id="scan">🔓 解码本页所有图片</button>
+  <button class="ghost" id="opts">⚙️ 打开设置</button>
+  <button class="ghost" id="reattach">🔄 刷新调试遥测</button>
+  <pre id="dbg" style="display:none;background:#14101f;border:1px solid #3a3060;border-radius:8px;padding:8px;font-size:10px;color:#8fe0b0;white-space:pre-wrap;margin-top:8px;"></pre>
+  <pre id="diag" style="display:none;background:#14101f;border:1px solid #603060;border-radius:8px;padding:8px;font-size:10px;color:#e0a8d8;white-space:pre-wrap;margin-top:6px;"></pre>
+  <div class="status" id="st"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

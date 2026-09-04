@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>MoeGuard 喵图混淆 · 设置</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px 26px 40px;
+    background: linear-gradient(160deg, #1c1630 0%, #241a38 100%);
+    color: #e8e2f5;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    max-width: 720px; margin: 0 auto;
+  }
+  h1 { font-size: 18px; color: #ffb7e2; margin: 0 0 4px; }
+  .sub { color: #9c93b1; font-size: 12px; margin-bottom: 22px; }
+  .card {
+    background: rgba(255,255,255,.045);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 14px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; color: #d9c9f2; margin: 0 0 12px; letter-spacing: .4px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 7px 0; }
+  .lbl { font-size: 13px; }
+  .desc { font-size: 11px; color: #8d84a6; margin-top: 2px; }
+  select, input[type=text], input[type=password] {
+    background: #2b2440; color: #eee; border: 1px solid #4a3f6b;
+    border-radius: 8px; padding: 6px 9px; font-size: 13px; min-width: 150px;
+  }
+  input[type=checkbox] { width: 17px; height: 17px; accent-color: #ff7cb8; }
+  .switch { display: flex; align-items: center; gap: 10px; }
+  button {
+    border: none; border-radius: 9px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    background: #5865f2; color: #fff;
+  }
+  button.ghost { background: #332c4d; color: #cfc6e8; }
+  #status { font-size: 12px; color: #7fe0a6; min-height: 18px; margin-top: 8px; }
+  #testWrap { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 12px; }
+  #testWrap figure { margin: 0; }
+  #testWrap img { max-width: 180px; border-radius: 8px; border: 1px solid #4a3f6b; display: block; }
+  #testWrap figcaption { font-size: 11px; color: #8d84a6; text-align: center; margin-top: 4px; }
+  #testVerdict { font-size: 12px; margin-top: 10px; }
+  .ok { color: #7fe0a6; } .bad { color: #ff9b9b; }
+  .warn {
+    background: rgba(226,150,40,.12); border: 1px solid rgba(226,150,40,.4);
+    border-radius: 10px; padding: 9px 12px; font-size: 11.5px; color: #ffd9a8; line-height: 1.7;
+  }
+</style>
+</head>
+<body>
+  <h1>🌸 MoeGuard 喵图混淆 · 设置</h1>
+  <div class="sub">自研无损「流光照影」混淆 (MOE v3) · 无需密钥 · 装插件即可互通解码</div>
+
+  <div class="card">
+    <h2>⚙️ 上传与显示</h2>
+    <div class="row"><div><div class="lbl">上传图片自动混淆</div><div class="desc">发送的图片会被打乱加密，Discord 与其他人看到的是乱块拼图</div></div><input type="checkbox" id="cfg-enabled"></div>
+    <div class="row"><div><div class="lbl">自动解码消息里的喵图</div><div class="desc">聊天流中自动检测并还原为原图显示（含别人的喵图）</div></div><input type="checkbox" id="cfg-autoDecode"></div>
+    <div class="row"><div><div class="lbl">显示角标</div><div class="desc">混淆/已解码的图左上角显示小标记；输入框预览图右上角有 ✕ 可取消单张混淆</div></div><input type="checkbox" id="cfg-badge"></div>
+  </div>
+
+  <div class="card">
+    <h2>🔍 内容审查（只混淆色情图片）</h2>
+    <div class="desc" style="margin:0 0 10px;line-height:1.7;">
+      关闭时：<b>所有图片都混淆</b>（默认，最安全）。<br>
+      开启后：所有图片都会过一遍检测，<b>只有得分 ≥ 阈值的才混淆</b>；检测失败时保守处理（仍然混淆）。
+    </div>
+    <div class="row"><div><div class="lbl">只混淆色情图片</div><div class="desc">打开后普通图直接原图发送，不影响正常交流</div></div><input type="checkbox" id="cfg-nsfwOnly"></div>
+    <div class="row"><div><div class="lbl">审查方式</div><div class="desc">本地 = 零网络零隐私风险（肤色面积+集中度+平滑度启发式）</div></div>
+      <select id="cfg-reviewMode">
+        <option value="local" selected>本地启发式（推荐）</option>
+        <option value="remote">仅远端 API</option>
+        <option value="both">两者取高分</option>
+      </select></div>
+    <div class="row"><div><div class="lbl">判定阈值</div><div class="desc">越低越容易被当成色情图而混淆（推荐 0.6~0.75）</div></div>
+      <select id="cfg-nsfwThreshold">
+        <option value="0.5">0.50 · 宽松（多混淆）</option>
+        <option value="0.6">0.60</option>
+        <option value="0.7" selected>0.70 · 默认</option>
+        <option value="0.8">0.80</option>
+        <option value="0.9">0.90 · 严格（少混淆）</option>
+      </select></div>
+    <div class="warn" style="margin:10px 0 6px;">
+      ⚠️ <b>隐私警告</b>：选「远端 API」意味着把图片（已缩到 512px）发给第三方服务器，
+      这与本插件「防图片外泄」的初衷相矛盾。如果图本身就是不想让人看到的，<b>请用本地启发式</b>。
+    </div>
+    <div class="row"><div><div class="lbl">API 供应商</div><div class="desc">generic = 任意 POST base64 、回 JSON 带分数的接口</div></div>
+      <select id="cfg-apiProvider">
+        <option value="generic" selected>generic（通用）</option>
+        <option value="sightengine">Sightengine</option>
+      </select></div>
+    <div class="row"><div><div class="lbl">API 地址</div><div class="desc">generic 模式必填，例：https://你的服务/nsfw</div></div><input type="text" id="cfg-apiUrl" placeholder="https://..." style="width:280px;"></div>
+    <div class="row"><div><div class="lbl">API 用户/ID</div><div class="desc">Sightengine 的 api_user；generic 不用填</div></div><input type="text" id="cfg-apiUser" placeholder="可空"></div>
+    <div class="row"><div><div class="lbl">API 密钥</div><div class="desc">generic 会作为 Bearer token 发送</div></div><input type="password" id="cfg-apiKey" placeholder="可空"></div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:8px;">
+      <button class="ghost" id="reviewTest">🧪 本地审查自测（不联网）</button>
+      <span id="reviewStatus" class="desc"></span>
+    </div>
+    <pre id="reviewOut" style="display:none;background:#14101f;border:1px solid #603060;border-radius:8px;padding:8px;font-size:11px;color:#e0a8d8;white-space:pre-wrap;margin-top:8px;"></pre>
+  </div>
+
+  <div class="card">
+    <h2>🧩 算法</h2>
+    <div class="row"><div><div class="lbl">分形块大小 (px)</div><div class="desc">自适应（推荐）= 根据图片尺寸自动选，上限 256。块越大花纹越整块，但补边浪费与体积也越大</div></div>
+      <select id="cfg-tile"><option value="0" selected>自适应（推荐）</option><option value="64">64</option><option value="128">128</option><option value="256">256</option><option value="512">512</option><option value="1024">1024</option></select></div>
+    <div class="row"><div><div class="lbl">盐值（可选，群组隔离）</div><div class="desc">留空 = 全员互通；填写后只有相同盐值的人能互解</div></div><input type="text" id="cfg-salt" maxlength="48" placeholder="留空"></div>
+  </div>
+
+  <div class="card">
+    <h2>📦 体积与动画</h2>
+    <div class="row"><div><div class="lbl">最大边长（有损缩放）</div><div class="desc">0 = 不缩放(完全无损)。噪点之外的打乱图压缩率高，一般无需缩放</div></div>
+      <select id="cfg-maxDim"><option value="0" selected>0 · 不缩放</option><option value="1024">1024</option><option value="1280">1280</option><option value="1600">1600</option><option value="2048">2048</option></select></div>
+    <div class="row"><div><div class="lbl">动画 GIF 原样发送</div><div class="desc">动画无法无损混淆，勾选后 GIF 不混淆直接发送</div></div><input type="checkbox" id="cfg-skipAnimated"></div>
+  </div>
+
+  <div style="display:flex;gap:10px;align-items:center;">
+    <button id="save">💾 保存设置</button>
+    <button class="ghost" id="test">🧪 运行算法往返测试</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="testWrap" style="display:none;"></div>
+  <div id="testVerdict"></div>
+
+  <script src="core.js"></script>
+  <script src="review.js"></script>
+  <script src="format.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

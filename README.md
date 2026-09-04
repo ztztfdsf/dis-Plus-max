@@ -160,7 +160,7 @@ PNG 是无损格式，压缩等级只影响体积不影响像素。
 
 ### 方式一：下载打包好的版本（推荐）
 
-从 [Releases](../../releases) 下载对应浏览器的 zip：
+从 [Releases](https://github.com/ztztfdsf/dis-Plus-max/releases) 下载对应浏览器的 zip，解压后按下面「加载到浏览器」操作：
 
 | 文件 | 用于 |
 |---|---|
@@ -170,7 +170,11 @@ PNG 是无损格式，压缩等级只影响体积不影响像素。
 
 ### 方式二：自己构建
 
+需要 Node.js（任意近期版本均可，零依赖，不用 npm install）：
+
 ```bash
+git clone https://github.com/ztztfdsf/dis-Plus-max.git
+cd dis-Plus-max
 node build.js              # 产出全部三个包到 dist/
 node build.js firefox      # 只构建一个
 ```
@@ -202,6 +206,16 @@ node build.js firefox      # 只构建一个
 > Developer Edition / Nightly 有效，正式版无法关闭签名校验）。
 
 **最低版本**：Chrome / Edge 111+ · Firefox 128+
+
+### 🤝 跟朋友一起用
+
+开箱即用，**不需要任何配置**——无密钥、无账号、无服务器。装了就能互相看到原图。
+
+- 你发的混淆图，对方**装了插件才能看到原图**；没装的只看到分形花纹
+- 两边的**盐值必须一致**（默认都留空 = 全员互通）。想做小圈子隔离就约定一个盐值一起填
+- 表情 / 贴纸解锁是**各自生效**的，与对方装不装无关（发出去的就是普通图片链接，任何人都能看到）
+
+建议转发给别人时把本页顶部的**风险告知**一起发过去。
 
 三浏览器的差异全部由 `build.js` 处理，源码不分叉（依据 MDN browser-compat-data 实测确认）：
 

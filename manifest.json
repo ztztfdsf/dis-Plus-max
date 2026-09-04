@@ -40,11 +40,5 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "minimum_chrome_version": "111",
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "moeguard@neko.local",
-      "strict_min_version": "128.0"
-    }
-  }
+  "minimum_chrome_version": "111"
 }

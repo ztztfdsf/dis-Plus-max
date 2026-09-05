@@ -19,7 +19,7 @@
    * 历史教训: Discord 用 react-helmet 接管 <html>/<head> 属性, 会抹掉外来 data-*;
    *   window.localStorage 也被 Discord 删掉了(防盗 token) → 主世界读不到。
    *   自己新建的 div 在 React 根之外, 不会被调和掉。 */
-  const DIAG_VER = '3.6.1';
+  const DIAG_VER = '3.6.2';
   let diagEl = null;
   function stamp(k, v) {
     try {
@@ -549,7 +549,10 @@
       btn.title = btn.getAttribute('aria-label');
     }
     if (chip) {
-      chip.textContent = !d ? '审查中'
+      /* 降级模式: 拿不到预览字节 (无法审查) ——
+       * 不能显示“审查中”卡在那里骗人, 直说默认行为。 */
+      chip.textContent = img.dataset.moeDegraded && !d ? (on ? '默认·混' : '默认·原')
+        : !d ? '审查中'
         : d.manual ? (on ? '手动·混' : '手动·原')
         : d.source === 'always' ? '混淆'
         : String(d.score) + (on ? '·混' : '·原');
@@ -588,17 +591,91 @@
     renderDecision(img, fp);
   }
 
+  /* ══════════════════════════════════════════════════════════════
+   * 取预览图字节 —— 三条路依次试
+   * ══════════════════════════════════════════════════════════════
+   * 【Firefox 丢 UI 的真因】
+   *   Discord 的预览卡用 <img src="blob:https://discord.com/…">,
+   *   这个 blob 是【页面】创建的, 归属页面的 principal。
+   *   Chrome 里隔离世界能直接 fetch 它; Firefox 不行 ——
+   *   内容脚本与页面是不同 principal, 读页面的 blob URL 直接失败,
+   *   preparePreview 抛异常 → 整个 UI(分数角标 + ✕/○ 开关)全都不出现。
+   *   (同族问题见 Mozilla bug 1696174: downloads.download 也读不了页面 blob)
+   *
+   * 三条路:
+   *   1. 直接 fetch —— Chromium 走这条, 最快
+   *   2. canvas 重绘 —— 图已经渲染在页面里了, 直接从 <img> 画到 canvas 取像素。
+   *      不受 principal 限制, 因为根本不发请求。blob: 与页面同源, canvas 不会被污染。
+   *   3. 主世界代取 —— 让 hook.js(MAIN world, 与页面同 principal)fetch 后
+   *      把 base64 传回来。留作兜底。
+   *
+   * ⚠️ 路 2 拿到的是 canvas 重编码的 PNG, 字节与原 File 不同 →
+   *   内容键(ck)会对不上上传的 PUT。所以走了路 2 就【不算 ck】,
+   *   只用感知指纹匹配。指纹是从像素算的, canvas 重绘不改像素, 照样准。
+   */
+  function canvasBlobFromImg(img) {
+    return new Promise((res) => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (!w || !h) { res(null); return; }
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0);
+        c.toBlob((b) => res(b || null), 'image/png');
+      } catch (e) { res(null); }
+    });
+  }
+
+  /* 让主世界替我们 fetch 页面自己的 blob: URL */
+  let mainGrabSeq = 0;
+  const mainGrabWaiters = new Map();
+  function mainWorldGrab(url) {
+    return new Promise((res) => {
+      const seq = ++mainGrabSeq;
+      const timer = setTimeout(() => { mainGrabWaiters.delete(seq); res(null); }, 4000);
+      mainGrabWaiters.set(seq, { res, timer });
+      try { window.postMessage({ __moe: 1, grabReq: seq, url }, '*'); }
+      catch (e) { clearTimeout(timer); mainGrabWaiters.delete(seq); res(null); }
+    });
+  }
+
+  async function grabPreviewBlob(img) {
+    const url = img.currentSrc || img.src || '';
+    // 路 1: 直接 fetch (Chromium)
+    try {
+      const r = await fetch(url);
+      if (r.ok) {
+        const b = await r.blob();
+        if (b && b.size) { img.dataset.moeGrab = 'fetch'; return b; }
+      }
+    } catch (e) {}
+    // 路 2: canvas 重绘 (Firefox 主力路径)
+    const cb = await canvasBlobFromImg(img);
+    if (cb && cb.size) { img.dataset.moeGrab = 'canvas'; return cb; }
+    // 路 3: 主世界代取
+    const mb = await mainWorldGrab(url);
+    if (mb && mb.size) { img.dataset.moeGrab = 'main'; return mb; }
+    return null;
+  }
+
   /** 预览图就位 → 指纹 + 内容键 → 审查 → 存结论 → 渲染 */
   async function preparePreview(img) {
     try {
-      const r = await fetch(img.currentSrc || img.src);
-      const blob = await r.blob();
+      const blob = await grabPreviewBlob(img);
+      if (!blob) throw new Error('no-blob');
       /* 【多图同时上传的关键】除了感知指纹, 再算一个字节级内容键。
        * 预览 blob 与上传 PUT 同源于同一个 File → 字节完全一致,
        * 所以内容键能【精确】把“这个开关”绑到“那笔上传”上,
        * 不会像感知指纹那样在多张相似图之间串位。 */
+      /* ⚠️ 只有走“直接 fetch / 主世界代取”拿到原字节时才算 ck。
+       *   canvas 重绘路径得到的是重编码的 PNG, 字节与原 File 不同 →
+       *   算出来的 ck 是假的, 会让 hook 端永远对不上。
+       *   宁可不算, 回落感知指纹 (指纹从像素算, canvas 重绘不改像素)。 */
       let ck = '';
-      try { ck = Core.contentKey(new Uint8Array(await blob.arrayBuffer())); } catch (e) {}
+      if (img.dataset.moeGrab !== 'canvas') {
+        try { ck = Core.contentKey(new Uint8Array(await blob.arrayBuffer())); } catch (e) {}
+      }
       const im = await FMT.blobToImageData(blob);
       const fp = Core.perceptualTag(im);
       img.dataset.moeFp = fp;
@@ -616,7 +693,16 @@
         tele({ ev: 'review', score: v.score, source: v.source, obfuscate: v.obfuscate });
       }
       makeToggle(img, fp);
-    } catch (e) { stamp('err', 'prep:' + e.message); }
+    } catch (e) {
+      stamp('err', 'prep:' + e.message);
+      /* 【不能静默死】拿不到预览字节时, 仍然把 UI 挂上去。
+       * 否则用户看到的就是“插件没反应”(Firefox 上就这么丢过 UI)。
+       * 没指纹也能翻开关 —— 默认混淆, 点一下就能改成原图发。 */
+      try {
+        img.dataset.moeDegraded = '1';
+        makeToggle(img, img.dataset.moeFp || ('?:' + (img.naturalWidth || 0) + 'x' + (img.naturalHeight || 0)));
+      } catch (e2) {}
+    }
   }
 
   function badgeComposerPreviews() {
@@ -731,6 +817,25 @@
           });
         } catch (err) {
           window.postMessage({ __moe: 1, reviewRes: seq, score: null }, '*');
+        }
+        return;
+      }
+      /* 主世界代取预览 blob 的回包 (Firefox 兵库路 3) */
+      if (typeof e.data.grabRes === 'number') {
+        const w = mainGrabWaiters.get(e.data.grabRes);
+        if (w) {
+          clearTimeout(w.timer);
+          mainGrabWaiters.delete(e.data.grabRes);
+          let blob = null;
+          try {
+            if (e.data.base64) {
+              const bin = atob(e.data.base64);
+              const u8 = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+              blob = new Blob([u8], { type: e.data.mime || 'image/png' });
+            }
+          } catch (err) {}
+          w.res(blob);
         }
         return;
       }

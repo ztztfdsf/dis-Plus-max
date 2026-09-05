@@ -534,6 +534,26 @@
           w.resolve(typeof e.data.score === 'number' ? e.data.score : null);
         }
       }
+      /* 【Firefox 专用】隔离世界读不了页面创建的 blob: URL (principal 不同),
+       * 由我们 (MAIN world, 与页面同 principal) 代取后回传 base64。
+       * 注: 这只是兵库 —— content.js 会先试直接 fetch 与 canvas 重绘。 */
+      if (e.data && e.data.__moe === 1 && typeof e.data.grabReq === 'number' && e.data.url) {
+        const seq = e.data.grabReq;
+        const reply = (base64, mime) => {
+          try { window.postMessage({ __moe: 1, grabRes: seq, base64: base64 || '', mime: mime || '' }, '*'); } catch (err) {}
+        };
+        (rawFetch ? rawFetch(e.data.url) : fetch(e.data.url))
+          .then((r) => (r.ok ? r.arrayBuffer().then((buf) => ({ buf, mime: r.headers.get('content-type') || 'image/png' })) : null))
+          .then((o) => {
+            if (!o) { reply(''); return; }
+            const u8 = new Uint8Array(o.buf);
+            let bin = '';
+            for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+            reply(btoa(bin), o.mime);
+          })
+          .catch(() => reply(''));
+        return;
+      }
       if (e.data && e.data.__moe === 1 && Array.isArray(e.data.decisions)) {
         const prev = decisions.length;
         decisions = e.data.decisions.filter((d) => d && typeof d.fp === 'string');

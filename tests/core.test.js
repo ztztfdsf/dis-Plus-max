@@ -853,3 +853,37 @@ test('贴纸: 锁判定用 stickerUnsendable 而非 guild_id', () => {
   assert.strictEqual(unsendable(mk('stickerNode_c6367b')), false, '无标记 → 原生发送');
   assert.strictEqual(unsendable(null), false, '拿不到节点 → 不拦 (交回原生, 避免误伤)');
 });
+
+test('Firefox 预览取字节: 三条路的降级顺序与 ck 归属', () => {
+  /* 【Firefox 丢 UI 的真因】Discord 预览卡是 <img src="blob:https://discord.com/…">,
+   * 这个 blob 归页面的 principal。Chrome 的隔离世界能 fetch 它, Firefox 不能
+   * (同族问题: Mozilla bug 1696174 —— downloads.download 也读不了页面 blob)。
+   * fetch 抛异常 → preparePreview 整个挂掉 → 分数角标与 ✕/○ 开关全都不出现。
+   *
+   * 修法: fetch → canvas 重绘 → 主世界代取, 依次降级。
+   * canvas 路不发请求, 所以不受 principal 限制。 */
+  const pick = (fetchOk, canvasOk) => fetchOk ? 'fetch' : (canvasOk ? 'canvas' : 'main');
+  assert.strictEqual(pick(true, true), 'fetch', 'Chromium: 直接 fetch 最快');
+  assert.strictEqual(pick(false, true), 'canvas', 'Firefox: fetch 失败 → canvas 重绘');
+  assert.strictEqual(pick(false, false), 'main', '都不行 → 主世界代取');
+
+  /* canvas 重绘拿到的是重编码 PNG, 字节与原 File 不同 →
+   * 算出来的内容键是假的, 会让 hook 端永远对不上。宁可不算, 回落感知指纹。 */
+  const shouldComputeCk = (grab) => grab !== 'canvas';
+  assert.strictEqual(shouldComputeCk('fetch'), true, 'fetch 拿到原字节 → 算 ck');
+  assert.strictEqual(shouldComputeCk('main'), true, '主世界代取也是原字节 → 算 ck');
+  assert.strictEqual(shouldComputeCk('canvas'), false, 'canvas 是重编码 → 不算 ck (否则假键)');
+});
+
+test('Firefox 预览取字节: 全失败也要挂上 UI, 不能静默死', () => {
+  /* 上一版的 catch 只 stamp 日志就结束了 → 用户看到的就是「插件没反应」。
+   * 现在即使拿不到字节也要 makeToggle: 没指纹也能翻开关, 默认混淆。 */
+  const label = (degraded, decision, on) =>
+    degraded && !decision ? (on ? '默认·混' : '默认·原')
+      : !decision ? '审查中'
+      : decision.manual ? (on ? '手动·混' : '手动·原') : '分数';
+  assert.strictEqual(label(true, null, true), '默认·混', '降级模式说实话, 不假装「审查中」');
+  assert.strictEqual(label(true, null, false), '默认·原', '降级模式也能翻到原图发送');
+  assert.strictEqual(label(false, null, true), '审查中', '正常路径审查中');
+  assert.strictEqual(label(true, { manual: true }, false), '手动·原', '用户手动推翻后按手动显示');
+});

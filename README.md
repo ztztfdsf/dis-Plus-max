@@ -2,7 +2,7 @@
 
 Discord 图片上传自动混淆扩展 —— **只有装了本插件的人才能看到原图**。轻量 · 无损 · **无需密钥** · 自研算法（MOE v3「流光照影」）。
 
-当前版本 **v3.6.1**（测试版）。许可证 GPL-3.0。
+当前版本 **v3.6.2**（测试版）。许可证 GPL-3.0。
 
 ---
 
@@ -227,6 +227,28 @@ node build.js firefox      # 只构建一个
 | `CompressionStream` | 80+ | 113+ | 都支持，无需改动 |
 | `storage.session` | 102+ | 115+ | 都支持，无需改动 |
 | `minimum_chrome_version` | ✅ | 无此键 | Firefox 包移除，换 `browser_specific_settings.gecko` |
+| 读页面创建的 `blob:` URL | ✅ 隔离世界可直接 fetch | ❌ principal 不同，读不了 | 代码内三级降级（见下） |
+
+### 🦊 Firefox 上预览卡 UI 丢失的真因
+
+Discord 的上传预览卡是 `<img src="blob:https://discord.com/…">`，这个 blob 归**页面**的 principal。
+Chrome 的隔离世界能直接 `fetch` 它，Firefox 不行 —— 内容脚本与页面是不同 principal，
+读页面的 blob URL 直接失败（同族问题见 [Mozilla bug 1696174](https://bugzilla.mozilla.org/show_bug.cgi?id=1696174)）。
+结果是 `preparePreview()` 抛异常 → 分数角标与 ✕/○ 开关**全部不出现**，看起来就像插件没装上。
+
+修法是三级降级取字节：
+
+1. **直接 fetch** —— Chromium 走这条，最快，拿到的是原 File 字节
+2. **canvas 重绘** —— 图已经渲染在页面里了，直接从 `<img>` 画到 canvas 取像素。
+   不发请求，所以不受 principal 限制 → **Firefox 的主力路径**
+3. **主世界代取** —— 让 `hook.js`（MAIN world，与页面同 principal）fetch 后回传 base64
+
+⚠️ 走 canvas 路径时**不算内容键**：canvas 重绘得到的是重编码 PNG，字节与原 File 不同，
+算出来的键是假的，会让 hook 端永远对不上。宁可不算，回落感知指纹
+（指纹从像素算，canvas 重绘不改像素，照样准）。
+
+三条路全失败时也要**把 UI 挂上去**（降级模式，角标显示「默认·混」）——
+旧版的 catch 只记了日志就结束，用户看到的就是「插件没反应」。
 
 `background.js` 本身没用到 `importScripts` / `clients` / `caches` 等 Service Worker 专属 API，
 所以换成 event page 声明后代码零改动即可运行。
@@ -255,7 +277,7 @@ node build.js firefox      # 只构建一个
 ## 🧪 测试
 
 ```bash
-node tests/core.test.js        # 50 项单测 (v3 无损往返/定位框/审查/指纹/流程顺序/元数据/表情贴纸)
+node tests/core.test.js        # 52 项单测 (v3 无损往返/定位框/审查/指纹/流程顺序/元数据/表情贴纸)
 node tests/make-icons.js       # 生成扩展图标
 node tests/make-test-image.js  # 生成测试图
 node tests/verify-cdn.js <channelId>   # 拉真实 Discord CDN 验证像素一致性
@@ -265,7 +287,7 @@ node build.js                  # 打三个浏览器的包
 **实测结果**：
 | 项目 | 结果 |
 |---|---|
-| 单测 (50 项) | ✅ 全通过，1MP 变换 16ms / 8ms；含元数据往返与流程顺序硬验证 |
+| 单测 (52 项) | ✅ 全通过，1MP 变换 16ms / 8ms；含元数据往返与流程顺序硬验证 |
 | 上传链路提速 | ✅ 1201ms → 157ms（7.7x），体积 2.49MB → 0.85MB（浏览器实测） |
 | 定位框识别 | ✅ 混淆图命中、普通图不误报、缩到 50% 仍能识别 |
 | 审查判定 | ✅ 裸露高分 / 风景·UI·花衣服低分 / 远端失败回落本地 / 异常保守混淆 |

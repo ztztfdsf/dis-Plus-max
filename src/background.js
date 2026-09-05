@@ -17,7 +17,7 @@
 const CONTEXT_MENU_ID = 'moe-decode-image';
 
 const dbg = {
-  version: '3.6.1',
+  version: '3.6.2',
   mode: '页面内拦截 (XHR + fetch seam)',
   tracked: 0, encoded: 0, uploadsSeen: 0, uploadsReplaced: 0, uploadsPass: 0,
   lastFile: '', lastSize: 0, lastReplace: '', lastError: '', lastTime: '', lastReview: '',

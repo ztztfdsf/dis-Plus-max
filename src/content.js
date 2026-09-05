@@ -19,7 +19,7 @@
    * 历史教训: Discord 用 react-helmet 接管 <html>/<head> 属性, 会抹掉外来 data-*;
    *   window.localStorage 也被 Discord 删掉了(防盗 token) → 主世界读不到。
    *   自己新建的 div 在 React 根之外, 不会被调和掉。 */
-  const DIAG_VER = '3.6.2';
+  const DIAG_VER = '3.6.3';
   let diagEl = null;
   function stamp(k, v) {
     try {
@@ -875,6 +875,8 @@
         if (diagEl) for (const a of diagEl.getAttributeNames()) {
           if (a.indexOf('data-') === 0) out[a.slice(5)] = diagEl.getAttribute(a);
         }
+        // 快速 PNG 编码失败原因 (以前被静默吞掉 → Firefox 上查不到首发异常)
+        try { if (FMT.lastFastPngErr) out.fastpng = FMT.lastFastPngErr; } catch (e) {}
         sendResponse(out);
         return true;
       }

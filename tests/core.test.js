@@ -887,3 +887,46 @@ test('Firefox 预览取字节: 全失败也要挂上 UI, 不能静默死', () =>
   assert.strictEqual(label(false, null, true), '审查中', '正常路径审查中');
   assert.strictEqual(label(true, { manual: true }, false), '手动·原', '用户手动推翻后按手动显示');
 });
+
+test('Firefox 解码: ImageData 必须与 canvas 同 realm', () => {
+  /* 【Firefox 无法解码的真因】(诊断面板原话)
+   *   dec:CanvasRenderingContext2D.putImageData:
+   *   Failed to extract Uint8ClampedArray from ImageData (security check failed?)
+   *
+   * 隔离世界(content script)与页面是不同 realm。
+   * document.createElement('canvas') 拿到的 canvas 属于【页面 realm】(带 Xray 包装),
+   * 而 new ImageData(...) 造出来的是【隔离世界】的对象 →
+   * putImageData 时 Firefox 无法跨 realm 取出里面的 Uint8ClampedArray, 直接抛。
+   * Chrome 的隔离世界没有这层限制, 所以之前一直没暴露。
+   *
+   * 修法: 用 ctx.createImageData() 让 ImageData 与 ctx 同 realm, 再 .data.set() 灌像素。 */
+  const mkCtx = (crossRealmOk) => ({
+    createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4), _realm: 'ctx' }),
+    putImageData: (id) => {
+      if (id._realm !== 'ctx' && !crossRealmOk) throw new Error('Failed to extract Uint8ClampedArray from ImageData (security check failed?)');
+      return 'ok';
+    },
+  });
+  const src = { width: 2, height: 2, data: new Uint8ClampedArray(16).fill(7) };
+
+  // 正确写法: 同 realm → Firefox 与 Chrome 都过
+  const draw = (ctx) => {
+    let id = null;
+    try { id = ctx.createImageData(src.width, src.height); id.data.set(src.data); } catch (e) { id = null; }
+    if (!id) id = { width: src.width, height: src.height, data: src.data, _realm: 'isolated' };
+    return ctx.putImageData(id);
+  };
+  assert.strictEqual(draw(mkCtx(false)), 'ok', 'Firefox(严格跨realm): 用 ctx.createImageData 才过');
+  assert.strictEqual(draw(mkCtx(true)), 'ok', 'Chrome(宽松): 同样过');
+
+  // 旧写法(直接 new ImageData)在 Firefox 上必然抛 —— 反面断言, 防回归
+  const drawOld = (ctx) => ctx.putImageData({ width: 2, height: 2, data: src.data, _realm: 'isolated' });
+  assert.throws(() => drawOld(mkCtx(false)), /security check failed/, '旧写法在 Firefox 上会抛');
+  assert.strictEqual(drawOld(mkCtx(true)), 'ok', '旧写法只在 Chrome 上侥幸能跑');
+
+  // 像素必须真的搬过去, 不能只是不报错
+  const ctx = mkCtx(false);
+  const id = ctx.createImageData(2, 2);
+  id.data.set(src.data);
+  assert.deepStrictEqual(Array.from(id.data), Array.from(src.data), '灌进去的像素要一致');
+});

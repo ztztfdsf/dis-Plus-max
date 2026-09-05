@@ -5,6 +5,7 @@
 'use strict';
 (function (global) {
   const w = (global._moeFormat = {});
+  w.lastFastPngErr = '';   // 最近一次快速 PNG 编码失败原因 (诊断面板用)
 
   w.isStaticImage = function (type) {
     return /^image\/(png|jpeg|jpg|webp|bmp)$/i.test(type || '');
@@ -23,7 +24,14 @@
       const ctx = c.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(bmp, 0, 0);
       const id = ctx.getImageData(0, 0, bmp.width, bmp.height);
-      return { width: id.width, height: id.height, data: id.data };
+      /* 【跨 realm 防护】canvas 属于页面 realm, getImageData 拿到的
+       * Uint8ClampedArray 也是那边的(Firefox 带 Xray 包装)。
+       * 在这里一次拷成本 realm 的数组 —— 下游 core.js 的像素循环
+       * 与 PNG 编码就全程跑在本地对象上, 不再碰 realm 边界。
+       * 代价是一次 memcpy, 相比后面的变换开销可忽略。 */
+      const local = new Uint8ClampedArray(id.data.length);
+      local.set(id.data);
+      return { width: id.width, height: id.height, data: local };
     } finally {
       try { bmp.close(); } catch (e) {}
     }
@@ -33,7 +41,23 @@
     const c = document.createElement('canvas');
     c.width = im.width;
     c.height = im.height;
-    c.getContext('2d').putImageData(new ImageData(im.data, im.width, im.height), 0, 0);
+    const ctx = c.getContext('2d');
+    /* 【Firefox 必须这么写】隔离世界(content script)与页面是不同 realm。
+     * document.createElement 拿到的 canvas 属于【页面 realm】(带 Xray 包装),
+     * 而 new ImageData(...) 造出来的是【隔离世界】的对象 →
+     * putImageData 时 Firefox 无法跳 realm 取出里面的 Uint8ClampedArray, 直接抛:
+     *   "Failed to extract Uint8ClampedArray from ImageData (security check failed?)"
+     * 用 ctx.createImageData() 让 ImageData 与 ctx 同 realm 就没这问题。
+     * (Chrome 的隔离世界没有这层限制, 所以之前一直没暴露) */
+    let id = null;
+    try {
+      id = ctx.createImageData(im.width, im.height);
+      id.data.set(im.data);
+    } catch (e) {
+      id = null;
+    }
+    if (!id) id = new ImageData(im.data, im.width, im.height);
+    ctx.putImageData(id, 0, 0);
     return c;
   };
 
@@ -51,7 +75,10 @@
     const Core = window.__MoeGuardCore;
     let u8 = null;
     if (Core && Core.encodePngFast) {
-      try { u8 = await Core.encodePngFast(enc); } catch (e) { u8 = null; }
+      /* 失败原因记下来 —— 以前这里静默回落 canvas,
+       * 结果 Firefox 上真正的首发异常被吞掉, 只看到下游 putImageData 报错。 */
+      try { u8 = await Core.encodePngFast(enc); w.lastFastPngErr = ''; }
+      catch (e) { u8 = null; w.lastFastPngErr = 'enc:' + String((e && e.message) || e).slice(0, 80); }
     }
     if (!u8) {
       const blob = await w.imageDataToBlob(enc, 'image/png');
@@ -73,7 +100,8 @@
     const Core = window.__MoeGuardCore;
     let u8 = null;
     if (Core && Core.encodePngFast) {
-      try { u8 = await Core.encodePngFast(im); } catch (e) { u8 = null; }
+      try { u8 = await Core.encodePngFast(im); w.lastFastPngErr = ''; }
+      catch (e) { u8 = null; w.lastFastPngErr = 'dec:' + String((e && e.message) || e).slice(0, 80); }
     }
     if (!u8) {
       const blob = await w.imageDataToBlob(im, 'image/png');

@@ -2,7 +2,7 @@
 
 Discord 图片上传自动混淆扩展 —— **只有装了本插件的人才能看到原图**。轻量 · 无损 · **无需密钥** · 自研算法（MOE v3「流光照影」）。
 
-当前版本 **v3.6.2**（测试版）。许可证 GPL-3.0。
+当前版本 **v3.6.3**（测试版）。许可证 GPL-3.0。
 
 ---
 
@@ -250,6 +250,31 @@ Chrome 的隔离世界能直接 `fetch` 它，Firefox 不行 —— 内容脚本
 三条路全失败时也要**把 UI 挂上去**（降级模式，角标显示「默认·混」）——
 旧版的 catch 只记了日志就结束，用户看到的就是「插件没反应」。
 
+### 🦊 Firefox 上无法解码的真因（跟上面是两回事）
+
+诊断面板原话：
+
+```
+dec:CanvasRenderingContext2D.putImageData:
+Failed to extract Uint8ClampedArray from ImageData (security check failed?)
+```
+
+隔离世界与页面是不同 **realm**。`document.createElement('canvas')` 拿到的 canvas
+属于**页面 realm**（Firefox 带 Xray 包装），而 `new ImageData(...)` 造出来的是
+**隔离世界**的对象 —— `putImageData` 时 Firefox 无法跳 realm 取出里面的
+`Uint8ClampedArray`，直接抛安全错误。Chrome 的隔离世界没这层限制，所以一直没暴露。
+
+两处修法：
+
+- `imageDataToCanvas()` 改用 **`ctx.createImageData()`** 造 ImageData（与 ctx 同 realm），
+  再 `.data.set()` 灌像素；旧的 `new ImageData` 只作兵库
+- `blobToImageData()` 把 `getImageData()` 的结果**拷一份到本 realm 数组**，
+  下游像素循环与 PNG 编码就全程不碰 realm 边界
+
+顺带把一个诊断盲区堵了：`encodePngFast` 失败时原来**静默回落** canvas，
+真正的首发异常被吞掉，只能看到下游报错。现在失败原因会记在 `FMT.lastFastPngErr`，
+弹窗诊断面板能看到。
+
 `background.js` 本身没用到 `importScripts` / `clients` / `caches` 等 Service Worker 专属 API，
 所以换成 event page 声明后代码零改动即可运行。
 
@@ -277,7 +302,7 @@ Chrome 的隔离世界能直接 `fetch` 它，Firefox 不行 —— 内容脚本
 ## 🧪 测试
 
 ```bash
-node tests/core.test.js        # 52 项单测 (v3 无损往返/定位框/审查/指纹/流程顺序/元数据/表情贴纸)
+node tests/core.test.js        # 53 项单测 (v3 无损往返/定位框/审查/指纹/流程顺序/元数据/表情贴纸)
 node tests/make-icons.js       # 生成扩展图标
 node tests/make-test-image.js  # 生成测试图
 node tests/verify-cdn.js <channelId>   # 拉真实 Discord CDN 验证像素一致性
@@ -287,7 +312,7 @@ node build.js                  # 打三个浏览器的包
 **实测结果**：
 | 项目 | 结果 |
 |---|---|
-| 单测 (52 项) | ✅ 全通过，1MP 变换 16ms / 8ms；含元数据往返与流程顺序硬验证 |
+| 单测 (53 项) | ✅ 全通过，1MP 变换 16ms / 8ms；含元数据往返与流程顺序硬验证 |
 | 上传链路提速 | ✅ 1201ms → 157ms（7.7x），体积 2.49MB → 0.85MB（浏览器实测） |
 | 定位框识别 | ✅ 混淆图命中、普通图不误报、缩到 50% 仍能识别 |
 | 审查判定 | ✅ 裸露高分 / 风景·UI·花衣服低分 / 远端失败回落本地 / 异常保守混淆 |

@@ -62,10 +62,12 @@
   <div class="card">
     <h2>🔍 内容审查（只混淆色情图片）</h2>
     <div class="desc" style="margin:0 0 10px;line-height:1.7;">
-      关闭时：<b>所有图片都混淆</b>（默认，最安全）。<br>
-      开启后：所有图片都会过一遍检测，<b>只有得分 ≥ 阈值的才混淆</b>；检测失败时保守处理（仍然混淆）。
+      开启（<b>默认</b>）：所有图片都会过一遍检测，<b>只有得分 ≥ 阈值的才混淆</b>；检测失败时保守处理（仍然混淆）。<br>
+      关闭：<b>所有图片都混淆</b>（最保守，一张不漏）。<br>
+      ⚠️ 本地检测是肤色启发式而不是模型，对插画 / 泳装 / 特写会漏判——
+      漏判的那张会以原图发出去。介意的话就关掉这个开关。
     </div>
-    <div class="row"><div><div class="lbl">只混淆色情图片</div><div class="desc">打开后普通图直接原图发送，不影响正常交流</div></div><input type="checkbox" id="cfg-nsfwOnly"></div>
+    <div class="row"><div><div class="lbl">只混淆色情图片</div><div class="desc">开（默认）= 景物截图等普通图直接原图发送，不影响正常交流</div></div><input type="checkbox" id="cfg-nsfwOnly"></div>
     <div class="row"><div><div class="lbl">审查方式</div><div class="desc">本地 = 零网络零隐私风险（肤色面积+集中度+平滑度启发式）</div></div>
       <select id="cfg-reviewMode">
         <option value="local" selected>本地启发式（推荐）</option>

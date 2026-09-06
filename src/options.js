@@ -2,7 +2,7 @@
 'use strict';
 const DEFAULTS = {
   enabled: true, autoDecode: true, badge: true, tile: 0, salt: '', maxDim: 0, skipAnimated: true,
-  nsfwOnly: false, nsfwThreshold: 0.7, reviewMode: 'local', apiProvider: 'generic', apiUrl: '', apiUser: '', apiKey: '',
+  nsfwOnly: true, nsfwThreshold: 0.7, reviewMode: 'local', apiProvider: 'generic', apiUrl: '', apiUser: '', apiKey: '',
 };
 
 const $ = (id) => document.getElementById(id);

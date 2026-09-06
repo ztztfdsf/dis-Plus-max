@@ -10,7 +10,11 @@
  * ⚠️ 诚实声明: localScore 是「肤色面积 + 集中度 + 平滑度」的启发式,
  *   不是真正的分类模型。它能拦住大面积裸露, 但对艺术插画/泳装/特写会误判。
  *   要认真做只能上模型 (本地 nsfwjs/WASM) 或商用审查 API。
- *   因此默认策略是 **全部混淆** (nsfwOnly=false), 审查只是可选优化。
+ *
+ * 【默认值 (v3.6.8 起)】nsfwOnly 默认为 true —— 主人明确要求默认勾上。
+ *   意味着默认只混淆高分图, 景物/截图直发原图。
+ *   代价说清楚: 启发式会漏判 → 漏的那张会以原图发出去。
+ *   想要“一张不漏”就把这个开关关掉 (关 = 全部混淆)。
  *
  * 失败策略: 任何一步出错 → 判定为「需要混淆」(保守, 宁可多混淆不可漏)
  * ══════════════════════════════════════════════════════════════════ */
@@ -124,7 +128,11 @@
    */
   async function decide(img, cfg, remoteFn) {
     cfg = cfg || {};
-    // 默认策略: 不启用审查 → 全部混淆
+    /* 开关关掉 (或根本没传 cfg) → 全部混淆。
+     * 注意这里存心用 !== true 而不是 !== false:
+     *   拿不到配置时宁可全混淆 (安全的那一侧),
+     *   而不是当成“只混淆高分图”把图直发出去。
+     *   默认值由调用方 (content.js / options.js 的 DEFAULTS) 负责传进来。 */
     if (cfg.nsfwOnly !== true) return { obfuscate: true, score: 1, source: 'always' };
     const th = typeof cfg.nsfwThreshold === 'number' ? cfg.nsfwThreshold : 0.7;
     const mode = cfg.reviewMode || 'local';

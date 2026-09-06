@@ -37,7 +37,7 @@ const VER = BASE.version;
 
 /* 打进包里的内容。dev/ 与 tests/ 不进包 —— 上架审核不需要, 也别让用户下载测试图 */
 const PAYLOAD = ['src', 'icons'];
-const EXTRA = ['README.md', 'LICENSE'];
+const EXTRA = ['README.md', 'CHANGELOG.md', 'LICENSE'];
 
 /* ══════════════════ manifest 变换 ══════════════════ */
 
@@ -198,6 +198,32 @@ function build(target) {
   for (const p of Object.values(manifest.icons || {})) declared.add(p);
   const missing = [...declared].filter((p) => !fs.existsSync(path.join(ROOT, p)));
   if (missing.length) throw new Error(target + ': manifest 引用了不存在的文件 → ' + missing.join(', '));
+
+  /* 【校验】源码里不得再写死扩展版本号
+   * 踩过的坑: popup.html、background.js、content.js 三处各自写死了 '3.6.3',
+   * manifest 一路升到 3.6.7, 三处都没跟 —— 主人开设置看到的一直是旧版号,
+   * 而这恰好是实页排障时最需要可信的一个数。
+   * 现在三处都读 chrome.runtime.getManifest().version, 这里把“不得回归”固定下来。
+   * 不是扩展版本的版本串 (如 core.js 的算法格式版 3.0.0) 在行尾标
+   *   // not-ext-version   即可豁免 —— 显式白名单比模糊匹配可靠。 */
+  const verLits = [];
+  const VER_RE = /\b\d+\.\d+\.\d+\b/g;
+  for (const f of files) {
+    if (!/\.(js|html)$/.test(f)) continue;
+    const text = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    text.split('\n').forEach((line, i) => {
+      const t = line.trim();
+      if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) return;  // 注释/踩坑记录
+      if (line.includes('not-ext-version')) return;                              // 显式豁免
+      if (/catch\s*\(/.test(line)) return;                                       // getManifest 失败时的回落
+      for (const m of line.match(VER_RE) || []) {
+        if (m !== VER) verLits.push(`${f}:${i + 1}  ${m}  ← 读 manifest, 或标 // not-ext-version`);
+      }
+    });
+  }
+  if (verLits.length) {
+    throw new Error(target + ': 源码里有写死的版本号\n    ' + verLits.join('\n    '));
+  }
 
   /* 写解压目录 */
   fs.mkdirSync(outDir, { recursive: true });

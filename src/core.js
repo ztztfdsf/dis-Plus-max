@@ -26,7 +26,10 @@
  * ══════════════════════════════════════════════════════════════════ */
 'use strict';
 
-const VERSION = '3.0.0';
+/* 【不是扩展版本号】这是【图片格式】的版本 (MOE v3 的 3.0.0),
+ * 改它会让旧图解不开 —— 与 manifest 的扩展版本号无关。
+ * build.js 会拦所有写死的版本号字面量, 这里显式豁免。 */
+const VERSION = '3.0.0';   // not-ext-version
 const MAGIC = [0x4D, 0x4F, 0x45];          // 'M','O','E' (写于末行标记像素 R/G/B, alpha 恒为 255)
 /* ---------- 确定性哈希 / PRNG ---------- */
 
@@ -459,37 +462,136 @@ function pngFilterSub(im) {
   return raw;
 }
 
-/** 快速编码为 PNG 字节 (需 CompressionStream); 不可用则 reject → 调用方回落 canvas */
+/** 扫描线不加滤波器 (每行前缀 0) —— 不压缩时滤波没意义, 省掉这道 CPU */
+function pngFilterNone(im) {
+  const w = im.width, h = im.height, src = im.data;
+  const stride = w * 4;
+  const raw = new Uint8Array(h * (stride + 1));
+  let p = 0;
+  for (let y = 0; y < h; y++) {
+    raw[p++] = 0;
+    const s = y * stride;
+    for (let i = 0; i < stride; i++) raw[p + i] = src[s + i];
+    p += stride;
+  }
+  return raw;
+}
+
+/** PNG 容器组装: IHDR + IDAT + IEND (纯字节运算, 无浏览器 API) */
+function assemblePng(w, h, idat) {
+  const ihdr = new Uint8Array(13);
+  ihdr[0] = (w >>> 24) & 255; ihdr[1] = (w >>> 16) & 255; ihdr[2] = (w >>> 8) & 255; ihdr[3] = w & 255;
+  ihdr[4] = (h >>> 24) & 255; ihdr[5] = (h >>> 16) & 255; ihdr[6] = (h >>> 8) & 255; ihdr[7] = h & 255;
+  ihdr[8] = 8;    // bit depth
+  ihdr[9] = 6;    // color type: RGBA
+  ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;         // deflate / adaptive filter / no interlace
+  const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const cIhdr = pngChunk('IHDR', ihdr);
+  const cIdat = pngChunk('IDAT', idat);
+  const cIend = pngChunk('IEND', new Uint8Array(0));
+  const out = new Uint8Array(sig.length + cIhdr.length + cIdat.length + cIend.length);
+  let o = 0;
+  out.set(sig, o); o += sig.length;
+  out.set(cIhdr, o); o += cIhdr.length;
+  out.set(cIdat, o); o += cIdat.length;
+  out.set(cIend, o);
+  return out;
+}
+
+/** 快速编码为 PNG 字节 (需 CompressionStream); 不可用则 reject → 调用方逐级回落
+ *
+ * ⚠️ 【不能用 writer.write(typedArray)】—— Firefox 隔离世界实测 (152, 2026-09):
+ *     writer.write(本 realm 的 Uint8Array)
+ *       → TypeError: Value could not be converted to any of: ArrayBufferView, ArrayBuffer.
+ *   CompressionStream 是页面 realm 的 DOM 对象, 它的参数转换拒收沙箱 realm 的
+ *   TypedArray (Xray 安全检查)。写失败后流被 abort, 收流端跟着报
+ *   AbortError / 空流 → 回落 canvas → 又撞上同样拒收沙箱数组的 putImageData →
+ *   用户看到的就是 "Failed to extract Uint8ClampedArray from ImageData"。
+ *
+ *   正解: 先塞进 Blob。Blob 构造器在建对象时就把字节【拷】进自己的存储,
+ *   BlobPart 转换不走 ArrayBufferView 联合类型 → 沙箱数组照收;
+ *   之后 blob.stream() 出来的流已经是页面 realm 的合法输入,
+ *   pipeThrough 全程不再碰 realm 边界。Chrome/Node 上行为完全一致。
+ *   (实测 1536×1152: 滤波 ~9ms + deflate ~9ms, 比 canvas.toBlob 的 ~1050ms 快两个数量级)
+ */
 function encodePngFast(im) {
   if (typeof CompressionStream === 'undefined') {
     return Promise.reject(new Error('no-CompressionStream'));
   }
+  if (typeof Blob === 'undefined') {
+    return Promise.reject(new Error('no-Blob'));
+  }
   const w = im.width | 0, h = im.height | 0;
-  const raw = pngFilterSub(im);
-  const cs = new CompressionStream('deflate');       // zlib 包装 (PNG 要的就是 zlib 流)
-  const writer = cs.writable.getWriter();
-  writer.write(raw);
-  writer.close();
-  return new Response(cs.readable).arrayBuffer().then((buf) => {
-    const idat = new Uint8Array(buf);
-    const ihdr = new Uint8Array(13);
-    ihdr[0] = (w >>> 24) & 255; ihdr[1] = (w >>> 16) & 255; ihdr[2] = (w >>> 8) & 255; ihdr[3] = w & 255;
-    ihdr[4] = (h >>> 24) & 255; ihdr[5] = (h >>> 16) & 255; ihdr[6] = (h >>> 8) & 255; ihdr[7] = h & 255;
-    ihdr[8] = 8;    // bit depth
-    ihdr[9] = 6;    // color type: RGBA
-    ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;         // deflate / adaptive filter / no interlace
-    const sig = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-    const cIhdr = pngChunk('IHDR', ihdr);
-    const cIdat = pngChunk('IDAT', idat);
-    const cIend = pngChunk('IEND', new Uint8Array(0));
-    const out = new Uint8Array(sig.length + cIhdr.length + cIdat.length + cIend.length);
-    let o = 0;
-    out.set(sig, o); o += sig.length;
-    out.set(cIhdr, o); o += cIhdr.length;
-    out.set(cIdat, o); o += cIdat.length;
-    out.set(cIend, o);
-    return out;
-  });
+  let stream;
+  try {
+    // zlib 包装 (PNG 要的就是 zlib 流)
+    stream = new Blob([pngFilterSub(im)]).stream().pipeThrough(new CompressionStream('deflate'));
+  } catch (e) {
+    return Promise.reject(e);
+  }
+  const reader = stream.getReader();
+  const parts = [];
+  let total = 0;
+  function pump() {
+    return reader.read().then((r) => {
+      if (r.done) {
+        const idat = new Uint8Array(total);
+        let o = 0;
+        for (const p of parts) { idat.set(p, o); o += p.length; }
+        return assemblePng(w, h, idat);
+      }
+      parts.push(r.value);
+      total += r.value.length;
+      return pump();
+    });
+  }
+  return pump();
+}
+
+/** adler32 (zlib 流尾部校验和); 按 NMAX 分段取模 → 不溢出且快 */
+function adler32(b) {
+  let a = 1, s = 0, i = 0;
+  const n = b.length, NMAX = 5552;
+  while (i < n) {
+    const end = Math.min(i + NMAX, n);
+    for (; i < end; i++) { a += b[i]; s += a; }
+    a %= 65521; s %= 65521;
+  }
+  return ((s << 16) | a) >>> 0;
+}
+
+/** 把字节包成合法 zlib 流, 全用 stored(未压缩)块 —— 零浏览器 API
+ *
+ * deflate 的 stored 块: 5 字节头 [BFINAL|BTYPE=00, LEN, ~LEN] + 原文, 每块最大 65535。
+ * 体积等于原文 + 约 0.008%, 但无需任何浏览器能力。
+ */
+function zlibStore(raw) {
+  const MAX = 65535;
+  const nb = Math.max(1, Math.ceil(raw.length / MAX));
+  const out = new Uint8Array(2 + nb * 5 + raw.length + 4);
+  let o = 0;
+  out[o++] = 0x78; out[o++] = 0x01;        // CMF/FLG: deflate, 32K 窗, 无字典
+  for (let i = 0; i < nb; i++) {
+    const s = i * MAX, len = Math.min(MAX, raw.length - s);
+    out[o++] = (i === nb - 1) ? 1 : 0;     // 最后一块置 BFINAL
+    out[o++] = len & 255; out[o++] = (len >>> 8) & 255;
+    out[o++] = (~len) & 255; out[o++] = ((~len) >>> 8) & 255;
+    out.set(raw.subarray(s, s + len), o); o += len;
+  }
+  const ad = adler32(raw);
+  out[o++] = (ad >>> 24) & 255; out[o++] = (ad >>> 16) & 255;
+  out[o++] = (ad >>> 8) & 255; out[o++] = ad & 255;
+  return out.subarray(0, o);
+}
+
+/** 无依赖 PNG 编码器 (同步, 不需 CompressionStream 也不需 canvas)
+ *
+ * 存在的意义: 当快速编码器在某个 realm 里不可用时, 这里能保证解码仍然完成。
+ * 代价是体积大 (不压缩), 但解码产物只是本地 blob URL, 体积无关紧要。
+ * PNG 本身无损, stored 块不影响像素。
+ */
+function encodePngStore(im) {
+  return assemblePng(im.width | 0, im.height | 0, zlibStore(pngFilterNone(im)));
 }
 
 const CHUNK_TYPE = 'moEg';
@@ -880,7 +982,7 @@ const API = {
   encodeImageV3, decodeImageV3, readMetaV3, writeMetaV3,
   probeMagic, detectFrame,
   makePRNG, saltTail, fnv1a, shufflePerm, hilbertOrder, v3TileSize,
-  encodePngFast, isPng, crc32,
+  encodePngFast, encodePngStore, isPng, crc32,
   pngAddMarker, pngReadMarker,
   pngGetTextChunks, pngPutTextChunks, pngReadMetaChunks, pngRestoreTextChunks,
   perceptualTag, tagMatches, contentKey, fnv1aBytes,

@@ -19,7 +19,14 @@
    * 历史教训: Discord 用 react-helmet 接管 <html>/<head> 属性, 会抹掉外来 data-*;
    *   window.localStorage 也被 Discord 删掉了(防盗 token) → 主世界读不到。
    *   自己新建的 div 在 React 根之外, 不会被调和掉。 */
-  const DIAG_VER = '3.6.3';
+  /* 【版本号】优先读 manifest —— 不能再靠手改字面量
+   * 这个项目里已经有三处版本号各自写死过 (popup.html、background.js、这里),
+   * 结果三处全停在 3.6.3 而 manifest 已到 3.6.8 —— 实页排障时
+   * 「到底跑的是哪个版本」全靠它, 报错了就是在领错路。
+   * 本地仿真页 (无扩展环境) 拿不到 manifest → 回落字面量。 */
+  const DIAG_VER = (function () {
+    try { return chrome.runtime.getManifest().version; } catch (e) { return '3.6.8'; }
+  })();
   let diagEl = null;
   function stamp(k, v) {
     try {
@@ -42,7 +49,7 @@
   if (!Core || !FMT) { stamp('fatal', 'no-core-or-fmt'); return; }
 
   const EXT = (() => { try { return !!(chrome && chrome.runtime && chrome.runtime.id); } catch (e) { return false; } })();
-  const DEFAULTS = { enabled: true, autoDecode: true, badge: true, tile: 0, salt: '', maxDim: 0, skipAnimated: true, nsfwOnly: false, nsfwThreshold: 0.7, reviewMode: 'local', apiProvider: 'generic', apiUrl: '', apiUser: '', apiKey: '' };
+  const DEFAULTS = { enabled: true, autoDecode: true, badge: true, tile: 0, salt: '', maxDim: 0, skipAnimated: true, nsfwOnly: true, nsfwThreshold: 0.7, reviewMode: 'local', apiProvider: 'generic', apiUrl: '', apiUser: '', apiKey: '' };
   const cfg = Object.assign({}, DEFAULTS);
 
   /* ---------- 诊断印记 ---------- */
@@ -89,7 +96,11 @@
       fetch(url, opt)
         .then(async (r) => {
           if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
-          const buf = new Uint8Array(await r.arrayBuffer());
+          /* 拷成本 realm 再切: 隔离世界里 r.arrayBuffer() 的 buffer 属于页面 realm,
+           * 对它的视图调 subarray 会报 Permission denied to access property "constructor"。 */
+          const raw = new Uint8Array(await r.arrayBuffer());
+          const buf = new Uint8Array(raw.length);
+          buf.set(raw);
           let bin = '';
           for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
           res({ ok: true, base64: btoa(bin), mime: r.headers.get('content-type') || 'image/png' });
@@ -672,9 +683,13 @@
        *   canvas 重绘路径得到的是重编码的 PNG, 字节与原 File 不同 →
        *   算出来的 ck 是假的, 会让 hook 端永远对不上。
        *   宁可不算, 回落感知指纹 (指纹从像素算, canvas 重绘不改像素)。 */
+      /* ⚠️ 必须走 FMT.blobToBytes: Firefox 隔离世界里
+       * new Uint8Array(await blob.arrayBuffer()) 拿到的是页面 realm 的 buffer 视图,
+       * contentKey 里的循环虽然能读, 但一旦下游碰 subarray 就报
+       * Permission denied to access property "constructor"。统一拷成本 realm 的。 */
       let ck = '';
       if (img.dataset.moeGrab !== 'canvas') {
-        try { ck = Core.contentKey(new Uint8Array(await blob.arrayBuffer())); } catch (e) {}
+        try { ck = Core.contentKey(await FMT.blobToBytes(blob)); } catch (e) {}
       }
       const im = await FMT.blobToImageData(blob);
       const fp = Core.perceptualTag(im);
@@ -844,7 +859,14 @@
       tele(d);
       if (d.ev === 'tracked') setTimeout(badgeComposerPreviews, 500);
       if (d.ev === 'encoded') badgeComposerPreviews();
-      if (d.ev === 'upload-replaced') toast('已混淆上传 · ' + (d.info || ''), 2600);
+      /* 【文案要说实话】obf=false 就是原图直通, 不能报「已混淆」。
+       * 旧版无论换没换体都拼“已混淆上传 · ”+label,
+       * label 又可能是“原图” → 凑出「已混淆上传 · 原图」这种矛盾话。 */
+      if (d.ev === 'upload-replaced') {
+        const kb = d.kb || '';
+        toast(d.obf === false ? ('原图直传' + (kb ? ' · ' + kb : ''))
+                              : ('已混淆上传' + (kb ? ' · ' + kb : '')), 2600);
+      }
       if (d.ev === 'skipped') toast((d.msg || '跳过'), 2200);
       if (d.ev === 'review') toast('审查 ' + (d.source || '') + ' 得分 ' + d.score + ' → ' + (d.obfuscate ? '混淆' : '不混淆'), 2400);
       if (d.ev === 'error') toast(d.msg, 4000);
@@ -875,8 +897,18 @@
         if (diagEl) for (const a of diagEl.getAttributeNames()) {
           if (a.indexOf('data-') === 0) out[a.slice(5)] = diagEl.getAttribute(a);
         }
-        // 快速 PNG 编码失败原因 (以前被静默吞掉 → Firefox 上查不到首发异常)
-        try { if (FMT.lastFastPngErr) out.fastpng = FMT.lastFastPngErr; } catch (e) {}
+        // PNG 编码实际走的路径 + 回落原因 (以前被静默吞掉 → Firefox 上查不到首发异常)
+        try {
+          out.png = (FMT.lastPngPath || '-') + (FMT.crossRealm ? ' xrealm' : '');
+          if (FMT.lastFastPngErr) out.fastpng = FMT.lastFastPngErr;
+        } catch (e) {}
+        // 输入框插入走的哪条通道 (Firefox 上 paste 失效时靠这个定位)
+        try { if (diagEl && diagEl.getAttribute('data-insert')) out.insert = diagEl.getAttribute('data-insert'); } catch (e) {}
+        /* 表情/贴纸点击到底有没有被我们接过手
+         * (v3.6.5 的真坑: 锁信号被自己擦掉 → 根本没劫持, insert 也就永远是空) */
+        try { if (diagEl && diagEl.getAttribute('data-hijack')) out.hijack = diagEl.getAttribute('data-hijack'); } catch (e) {}
+        // 徽标条定位走的哪条路: img=落在图内 / gutter=图未布局时的回落
+        try { if (diagEl && diagEl.getAttribute('data-badge')) out.badge = diagEl.getAttribute('data-badge'); } catch (e) {}
         sendResponse(out);
         return true;
       }
@@ -940,19 +972,92 @@
     return myUserId;
   }
   function fetchMyId() { detectMyId(); }
-  /** 从消息 li 里找作者头像 img (avatar URL 含 /avatars/<userId>/) */
-  function authorOf(li) {
-    if (!li) return null;
-    const av = li.querySelector('img[src*="/avatars/"]');
-    return av || null;
+
+  /* ---------- 消息作者归属 ----------
+   * 【带回复的消息会把归属判反】实测 DOM 顺序 (2026-09 拓下来的真页面):
+   *     div.message__…hasReply_
+   *       └ div.repliedMessage_   → img.replyAvatar_  ← 【被回复者】先出现!
+   *       └ div.contents_        → img.avatar_       ← 真正的作者
+   *   旧写法 anchor.querySelector('img[src*="/avatars/"]') 命中的是第一个,
+   *   也就是被回复者 → 别人回复我时, 他的图被标成「已混淆」。
+   *   拓的页面里 8 条带回复的消息, 8 条第一个头像都是 replyAvatar,
+   *   其中 1 条被回复者正好是我 → 就是主人看到的那一条。
+   *
+   * 两道保险 (探针实测过两路都灵):
+   *   1. DOM: 只在 contents_ 容器内找, 且排掉 replyAvatar 类名
+   *   2. React fiber: 直接读 message.author.id (最准, 头像换了也不影响)
+   *      ⚠️ Firefox 隔离世界看不到 DOM 节点上的 React expando:
+   *        Object.keys(node) 里根本没有 __reactFiber$… (探针实测 NONE)
+   *        必须走 node.wrappedJSObject 穿透 → 才能读到 author.id
+   * -------------------------------------------------- */
+
+  /** 拿到能看见 React expando 的那个节点视图 (Firefox 隔离世界 → wrappedJSObject) */
+  function pageNode(el) {
+    if (!el) return null;
+    try { if (el.wrappedJSObject) return el.wrappedJSObject; } catch (e) {}
+    return el;
   }
+
+  /** 从 React fiber 读消息作者 id; 拿不到返回 '' */
+  function fiberAuthorId(el) {
+    try {
+      const node = pageNode(el);
+      if (!node) return '';
+      const key = Object.keys(node).find((k) => k.indexOf('__reactFiber$') === 0);
+      if (!key) return '';
+      let f = node[key];
+      for (let i = 0; i < 14 && f; i++) {
+        const p = f.memoizedProps;
+        const msg = p && p.message;
+        const id = msg && msg.author && msg.author.id;
+        if (id) return String(id);
+        f = f.return;
+      }
+    } catch (e) {}
+    return '';
+  }
+
+  /** 这条消息的作者头像 (排掉被回复者的 replyAvatar) */
+  function authorAvatar(scope) {
+    if (!scope || !scope.querySelector) return null;
+    const box = scope.querySelector('[class*="contents"]') || scope;
+    return box.querySelector('img[src*="/avatars/"]:not([class*="replyAvatar"])')
+        || scope.querySelector('img[src*="/avatars/"]:not([class*="replyAvatar"])');
+  }
+
+  /** 这条消息是不是我发的 → true / false / null(不确定) */
+  function isMine(anchor, li) {
+    // 路 1: fiber 直读作者 id (不依赖头像存不存在)
+    const fid = fiberAuthorId(anchor) || fiberAuthorId(li);
+    if (fid) return detectMyId() ? fid === myUserId : null;
+    if (!detectMyId()) return null;
+    // 路 2: DOM 头像 (排掉 replyAvatar)
+    const av = authorAvatar(anchor);
+    if (av) {
+      const m = av.src.match(/\/avatars\/(\d+)\//);
+      if (m) return m[1] === myUserId;
+    }
+    /* 路 3: 合并组的后续消息根本没头像 → 往上找同组首条。
+     * 注意也要排 replyAvatar, 否则翻到上一条的引用头像上依旧会错。 */
+    let prev = li && li.previousElementSibling;
+    for (let k = 0; k < 30 && prev; k++) {
+      const pf = fiberAuthorId(prev);
+      if (pf) return pf === myUserId;
+      const a = authorAvatar(prev);
+      if (a) {
+        const m = a.src.match(/\/avatars\/(\d+)\//);
+        if (m) return m[1] === myUserId;
+      }
+      prev = prev.previousElementSibling;
+    }
+    return null;
+  }
+
   function CLIPS(cs) { return /hidden|clip|auto|scroll/.test(cs.overflow + ' ' + cs.overflowX + ' ' + cs.overflowY); }
 
-  /** 消息级徽标: 挂在消息左侧的头像槽 (72px gutter), 但【不绑头像元素】
+  /** 消息级徽标的锚: 图所属的那条消息 (绝不绑头像元素)
    * 为何不绑头像: Discord 把同一人连发的多条消息合并成一组,
    *   后续消息根本没有头像元素 → 绑头像的话第二条以后就没有徽标 (主人踩过)。
-   * 改成锚在 message__ 容器上 (它本来就是 position:relative),
-   *   用 left:16px 落进 gutter; 有头像就排头像下方, 合并组没头像就贴顶部。
    * 一条消息一个徽标 (带图片张数), 不管发几张图、连发几条都不会丢。 */
   function msgAnchor(img) {
     /* 【必须用 closest 而不是 li.querySelector】
@@ -977,11 +1082,69 @@
       return i.getBoundingClientRect().width >= 80;
     });
   }
-  const GUTTER_BASE = 'position:absolute;left:16px;z-index:5;box-sizing:border-box;' +
+  /* ---------- 徽标条的样式与定位 ----------
+   * 【主人要的位置】角标与下载放在【图片外面】的头像槽里, 就像 Chrome 上看到的那样。
+   *   Chrome v3.6.4 实测坐标 (本人用 CDP 量的):
+   *       消息容器 1126×419
+   *       角标 (16,48) 40×16    ← 头像下方
+   *       下载 (16,68) 30×16    ← 再下一行
+   *       图片 (72,26) 522×348  ← 从 x=72 开始, 角标完全在图外
+   *   所以坐标系本身是对的 —— 不能改成锚图片 (v3.6.6 改错了方向)。
+   *
+   * 【真正的 bug】老版把两个元素各自 absolute, 各自算 top:
+   *       const top = av ? (av.offsetTop + av.offsetHeight + 4) : 2;
+   *       tag.style.top = top;  dl.style.top = top + 20;
+   *   #15 归属重构删了 av 这个局部变量 → 这行变成 ReferenceError。
+   *   它在两个元素【已 append 进 DOM 之后】才执行, 又被外层 catch 吞掉 →
+   *   top 永远没写上, 两个 absolute 元素 top:auto 一起塌到同一处 → 重叠。
+   *   实页诊断里这条 74 次: err="tag:av is not defined"。
+   *   (Chrome 那边看着正常, 是因为装的还是 v3.6.4 —— av 当时还在。)
+   *
+   * 【修法】位置维持原样 (图外头像槽), 但把“排上下”从手算改成浏览器排:
+   *   1. tag 与 dl 装进同一个 flex 列 (.moe-msg-bar, flex-direction:column),
+   *      行距交给 gap → 只要算一个 top, 结构上不可能再重叠。
+   *   2. top 仍取头像下方, 但头像用现成的 authorAvatar() 拿 (它已排掉 replyAvatar),
+   *      且用 rect 差而不是 offsetTop —— offsetParent 不一定是 anchor。
+   *   3. 宽度限在头像槽内 (用图片左边缘算可用宽度) → 多张图时文案变长也不会盖到图。
+   * -------------------------------------------------- */
+  const BAR_BASE = 'position:absolute;left:16px;z-index:5;display:flex;flex-direction:column;' +
+    'align-items:flex-start;gap:4px;pointer-events:none;box-sizing:border-box;';
+  const CHIP_BASE = 'box-sizing:border-box;' +
     'font:600 10px/16px var(--font-primary),"Segoe UI","Microsoft YaHei",sans-serif;' +
-    'padding:0 5px;border-radius:var(--radius-xs,4px);white-space:nowrap;max-width:64px;overflow:hidden;' +
+    'padding:0 5px;border-radius:var(--radius-xs,4px);white-space:nowrap;overflow:hidden;' +
+    'max-width:100%;' +
     'background:var(--background-surface-highest,#fff);color:var(--text-muted,#949ba4);' +
     'box-shadow:var(--shadow-border),var(--shadow-low);';
+
+  /** 徽标条定位: 图片外侧的头像槽, 头像下方 (没头像就贴顶)
+   * 返回走了哪条路 (进诊断印记, 方便实页核对) */
+  function placeBar(bar, anchor, img) {
+    let top = 2, how = 'top', width = '56px';
+    try {
+      const ar = anchor.getBoundingClientRect();
+      const cs = getComputedStyle(anchor);
+      const bt = parseFloat(cs.borderTopWidth) || 0;
+      const bl = parseFloat(cs.borderLeftWidth) || 0;
+      // 排在头像下方 (合并组的后续消息没头像 → 贴顶)
+      const av = authorAvatar(anchor);
+      if (av) {
+        const vr = av.getBoundingClientRect();
+        if (vr.height > 0) { top = Math.round(vr.top - ar.top - bt + vr.height + 4); how = 'avatar'; }
+      }
+      /* 宽度卡在头像槽内: 图片左边缘 − 左偏移 16 − 2px 富余
+       * 不写死 56px 是因为紧凑模式 / 侧边栏开合时槽宽会变。 */
+      const ir = img && img.getBoundingClientRect();
+      if (ir && ir.width >= 24) {
+        const avail = Math.round(ir.left - ar.left - bl) - 16 - 2;
+        if (avail >= 36) width = Math.min(avail, 120) + 'px';
+      }
+    } catch (e) {}
+    // 【先比再写】retagAll 每 1.2s 一轮, 相同值也写回去会白白触发样式重算
+    const t = top + 'px';
+    if (bar.style.top !== t) bar.style.top = t;
+    if (bar.style.maxWidth !== width) bar.style.maxWidth = width;
+    return how;
+  }
 
   function tagAvatar(img, kind, hasMeta) {
     if (!cfg.badge) return;
@@ -999,47 +1162,44 @@
       const pickable = shotsIn(anchor);            // 下载弹窗能选的 (含未混淆的附件)
 
       const li = img.closest('li[id^="chat-messages"], li');
-      const av = anchor.querySelector('img[src*="/avatars/"]');
-      let mine = null;
-      if (detectMyId()) {
-        if (av) {
-          const m = av.src.match(/\/avatars\/(\d+)\//);
-          mine = !!(m && m[1] === myUserId);
-        } else if (li) {
-          // 合并组的后续消息没头像 → 往上找同组首条消息的作者
-          let prev = li.previousElementSibling;
-          for (let k = 0; k < 30 && prev; k++) {
-            const a = prev.querySelector && prev.querySelector('img[src*="/avatars/"]');
-            if (a) { const m = a.src.match(/\/avatars\/(\d+)\//); mine = !!(m && m[1] === myUserId); break; }
-            prev = prev.previousElementSibling;
-          }
-        }
-      }
+      const mine = isMine(anchor, li);
 
       const base = decoded.length ? (mine === true ? '已混淆' : '已解析')
         : (shots[0].dataset.moeScan === 'resized' ? '需原图' : '喵图');
       const label = shots.length > 1 ? base + ' ' + shots.length : base;
       const anyMeta = decoded.some((i) => i.dataset.moeMeta === '1');
 
-      let tag = anchor.querySelector(':scope > .moe-msg-tag');
+      let bar = anchor.querySelector(':scope > .moe-msg-bar');
+      if (!bar) {
+        /* 旧版把 tag/dl 直接挂在 anchor 下。扩展热重载 (web-ext reload) 会把
+         * content script 再注入一次而页面 DOM 还在 → 不清就会两套共存。 */
+        anchor.querySelectorAll(':scope > .moe-msg-tag, :scope > .moe-msg-dl').forEach((e) => e.remove());
+        bar = document.createElement('div');
+        bar.className = 'moe-msg-bar';
+        bar.style.cssText = BAR_BASE;
+        anchor.appendChild(bar);
+      }
+
+      let tag = bar.querySelector(':scope > .moe-msg-tag');
       if (!tag) {
         tag = document.createElement('div');
         tag.className = 'moe-msg-tag';
-        tag.style.cssText = GUTTER_BASE + 'pointer-events:none;';
-        anchor.appendChild(tag);
+        tag.style.cssText = CHIP_BASE;
+        bar.appendChild(tag);
       }
       if (tag.textContent !== label) tag.textContent = label;
       tag.title = (mine === true ? '这条消息的图已混淆上传' : '已自动解码为原图')
         + ' · ' + shots.length + ' 张' + (anyMeta ? ' · 含工作流元数据' : '');
 
-      let dl = anchor.querySelector(':scope > .moe-msg-dl');
+      let dl = bar.querySelector(':scope > .moe-msg-dl');
       if (decoded.length) {
         if (!dl) {
           dl = document.createElement('div');
           dl.className = 'moe-msg-dl';
           dl.setAttribute('role', 'button');
           dl.setAttribute('tabindex', '0');
-          dl.style.cssText = GUTTER_BASE + 'cursor:pointer;';
+          // 条本身 pointer-events:none (不挡头像/消息), 只有这个按钮收事件
+          dl.style.cssText = CHIP_BASE + 'cursor:pointer;pointer-events:auto;';
           dl.addEventListener('mouseenter', () => { dl.style.color = 'var(--text-default,#2e3338)'; });
           dl.addEventListener('mouseleave', () => { dl.style.color = 'var(--text-muted,#949ba4)'; });
           dl.addEventListener('click', (e) => {
@@ -1047,11 +1207,13 @@
             /* 【必须当场取锚】不能用创建时闭包里的 anchor:
              * 徒标只建一次, 后续 retagAll 不重绑事件 → 一旦 Discord 重用这个
              * 消息节点渲染其他内容, 旧闭包就会拿到别条消息的图
-             * (主人遇到的“第二个点开看见的是第一个图”)。 */
-            const host = e.currentTarget && e.currentTarget.parentElement;
+             * (主人遇到的“第二个点开看见的是第一个图”)。
+             * 现在 tag/dl 包在 .moe-msg-bar 里, parentElement 是那个条而不是
+             * 消息了 → 必须 closest 到打了 data-moe-tagged 的消息容器。 */
+            const host = e.currentTarget && e.currentTarget.closest('[data-moe-tagged="1"]');
             downloadModal(host || anchor);
           }, true);
-          anchor.appendChild(dl);
+          bar.appendChild(dl);
         }
         const dlLabel = pickable.length > 1 ? '下载 ' + pickable.length : '下载';
         if (dl.textContent !== dlLabel) dl.textContent = dlLabel;
@@ -1059,10 +1221,14 @@
         dl.title = dl.getAttribute('aria-label');
       } else if (dl) { dl.remove(); dl = null; }
 
-      // 位置: 头像下方 (没头像就贴顶)
-      const top = av ? (av.offsetTop + av.offsetHeight + 4) : 2;
-      tag.style.top = Math.round(top) + 'px';
-      if (dl) dl.style.top = Math.round(top + 20) + 'px';
+      /* 宽度参照: 本条消息里【第一张真正布局出来的图】的左边缘
+       * —— 用它把徽标条卡在头像槽内, 保证不盖到图。
+       * 不能直接拿 shots[0] —— 惰加载时它的 rect 可能还是 0×0。 */
+      const target = shots.find((i) => {
+        const r = i.getBoundingClientRect();
+        return r.width >= 24 && r.height >= 24;
+      }) || shots[0];
+      stamp('badge', placeBar(bar, anchor, target) + ' n=' + shots.length);
     } catch (e) { stamp('err', 'tag:' + e.message); }
   }
 
@@ -1172,7 +1338,7 @@
       // 图/消息被删 → 徽标跟着没
       document.querySelectorAll('[data-moe-tagged="1"]').forEach((a) => {
         if (!a.querySelector('img[data-moe-scan="decoded"], img[data-moe-scan="resized"], img[data-moe-scan="bad-salt"]')) {
-          a.querySelectorAll(':scope > .moe-msg-tag, :scope > .moe-msg-dl').forEach((e) => e.remove());
+          a.querySelectorAll(':scope > .moe-msg-bar, :scope > .moe-msg-tag, :scope > .moe-msg-dl').forEach((e) => e.remove());
           delete a.dataset.moeTagged;
         }
       });
@@ -1364,14 +1530,19 @@
       }
     } catch (e) {}
     try {
-      // 去掉禁用标记 (Discord 用 aria-disabled 拦点击)
-      document.querySelectorAll('[class*="emojiItem"][aria-disabled="true"], button[data-type="emoji"][aria-disabled="true"]').forEach((el) => {
-        el.removeAttribute('aria-disabled');
+      /* 【先固化锁信号, 再去掉 aria-disabled】顺序不能反 —— 这就是主人报的
+       * 「解锁了的表情插不出链接」的真因, 详见 emojiLocked() 的注释。 */
+      document.querySelectorAll('button[data-type="emoji"], [class*="emojiItem"]').forEach((el) => {
+        const host = emojiHost(el);
+        markEmojiLock(host);
+        // 去掉禁用标记 (Discord 用 aria-disabled 拦点击)
+        if (host.getAttribute('aria-disabled') === 'true') host.removeAttribute('aria-disabled');
+        if (el !== host && el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
       });
       /* 不再给 lockedEmoji 图打 data-moe-unlocked 标记 —— 实测发现面板里
        * 【所有 57 个表情】的图都带这个类名, 拿它当锁信号会把本服可用表情
        * 也当成锁住的 → 本可以原生发的表情反而被我们换成了链接。
-       * 锁定判定改由 emojiLocked() 根据 emojiLockIcon 元素实时判断。 */
+       * 锁定判定改由 emojiLocked() 判断。 */
     } catch (e) {}
   }
 
@@ -1380,28 +1551,142 @@
    *   两者不同步时以 model 为准 —— 发送时读的是 model。
    *   · execCommand('insertText'): 只改了 DOM, model 完全没动
    *     → 输入框里能看到字, 但发出去是空的 / 或者根本发不出去。
-   *       (主人看到的「表情有问题」正是这个: 框里有 URL, 发送无效)
-   *   · ClipboardEvent('paste'): model 真的更新了, DOM 由 Slate 自己重绘
-   *     → 这才是正确通道。
-   * 所以主用 paste, execCommand 只当最后的兜底。 */
+   *   · 伪造 paste: model 真的更新了 —— 但仅限 Chrome, 详见下方。
+   *
+   * 【Firefox 上发不出去的真因】(152 探针实测, 2026-09)
+   *   new ClipboardEvent('paste', { clipboardData: dt })
+   *     → 页面端读到 e.clipboardData.types === "" (空!), getData 拿到空字符串
+   *   关键: 这不是跨 realm 问题 —— 让【页面 realm 自己】造也一样是空的。
+   *   Gecko 的 ClipboardEvent 构造器不实现 clipboardData 这个 init 成员
+   *   (Chrome 实现了, 所以旧写法只在 Chrome 能跑)。
+   *   → Slate 的 paste 处理器拿到空剪贴板, model 不更新, 发出去就是空。
+   *
+   * 【修法】造完事件再 Object.defineProperty 把 clipboardData 盖上去。
+   *   但在隔离世界里还有两道 realm 关卡 (都是探针里撞出来的):
+   *     · 沙箱造的 DataTransfer 盖上去 → 页面读出来 types 仍为空
+   *       → 必须用页面 realm 的构造器 new PAGEW.DataTransfer()
+   *     · new PAGEW.ClipboardEvent(type, 沙箱init)
+   *       → Permission denied to access property "bubbles"
+   *       → init 字典必须先 cloneInto 到页面 realm
+   *
+   * 四条通道依次尝试, 哪条真的改动了编辑器就用它:
+   *   1. paste (Slate 官方处理路径, 最可靠)
+   *   2. beforeinput + dataTransfer (insertFromPaste)
+   *   3. beforeinput + data (insertText)
+   *   4. execCommand (只改 DOM, 兵库)
+   * 四条在 Firefox 152 探针里都验证过能写进 model。 */
   function composerEl() {
-    return document.querySelector('[class*="slateTextArea"] [contenteditable="true"], [contenteditable="true"][role="textbox"], textarea[role="textbox"]');
+    /* 优先拿正在输入的那个: 回复模式/子区会同时存在多个 textbox,
+     * 拿错了就把链接插到不可见的那个里 —— 看着就是“没反应”。
+     * (Discord 的搜索框是 role="combobox", 不会误命中) */
+    const act = document.activeElement;
+    if (act && act.getAttribute && act.getAttribute('contenteditable') === 'true' &&
+        act.getAttribute('role') === 'textbox') return act;
+    const list = document.querySelectorAll('[contenteditable="true"][role="textbox"], [class*="slateTextArea"][contenteditable="true"], textarea[role="textbox"]');
+    for (const el of list) {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) return el;
+    }
+    return list[0] || null;
   }
-  function insertIntoComposer(text) {
-    const input = composerEl();
-    if (!input) return false;
-    input.focus();
-    // 主通道: 伪造粘贴 (Slate 有正式的 paste 处理, 会写进 model)
+
+  /* 页面 realm 句柄: Firefox 隔离世界才有; Chrome / 主世界为 null */
+  const PAGEW = (function () {
+    try { return window.wrappedJSObject || null; } catch (e) { return null; }
+  })();
+  /** 事件 init 字典 → 页面 realm 读得懂的形式 */
+  function pageInit(obj) {
+    if (!PAGEW || typeof cloneInto !== 'function') return obj;
+    try { return cloneInto(obj, PAGEW); } catch (e) { return obj; }
+  }
+  function pageCtor(name) {
+    return (PAGEW && PAGEW[name]) || window[name] || null;
+  }
+  /** 页面 realm 的 DataTransfer + 文本 */
+  function pageDataTransfer(text) {
+    const Ctor = pageCtor('DataTransfer');
+    if (!Ctor) return null;
+    const dt = new Ctor();
+    dt.setData('text/plain', text);
+    return dt;
+  }
+  function caretToEnd(el) {
     try {
-      const dt = new DataTransfer();
-      dt.setData('text/plain', text);
-      const ev = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true });
+      el.focus();
+      const sel = window.getSelection();
+      if (!sel) return;
+      sel.removeAllRanges();
+      const r = document.createRange();
+      r.selectNodeContents(el);
+      r.collapse(false);
+      sel.addRange(r);
+    } catch (e) {}
+  }
+
+  const INSERT_CHANNELS = [
+    ['paste', function (input, text) {
+      const dt = pageDataTransfer(text);
+      const CE = pageCtor('ClipboardEvent');
+      if (!dt || !CE) return false;
+      const ev = new CE('paste', pageInit({ bubbles: true, cancelable: true }));
+      // Gecko 的构造器不认 clipboardData → 造完再盖上去
+      try { Object.defineProperty(ev, 'clipboardData', { value: dt, configurable: true }); }
+      catch (e) { return false; }
       input.dispatchEvent(ev);
       return true;
-    } catch (e) {}
+    }],
+    ['beforeinput-dt', function (input, text) {
+      const dt = pageDataTransfer(text);
+      const IE = pageCtor('InputEvent');
+      if (!dt || !IE) return false;
+      const init = pageInit({ bubbles: true, cancelable: true, inputType: 'insertFromPaste' });
+      try { init.dataTransfer = dt; } catch (e) { return false; }
+      input.dispatchEvent(new IE('beforeinput', init));
+      return true;
+    }],
+    ['beforeinput-text', function (input, text) {
+      const IE = pageCtor('InputEvent');
+      if (!IE) return false;
+      input.dispatchEvent(new IE('beforeinput', pageInit({
+        bubbles: true, cancelable: true, inputType: 'insertText', data: text,
+      })));
+      return true;
+    }],
+    ['execCommand', function (input, text) {
+      caretToEnd(input);
+      return !!(document.execCommand && document.execCommand('insertText', false, text));
+    }],
+  ];
+
+  /** 输入框当前内容指纹 (判断通道是否真的生效) */
+  function composerSig(input) {
     try {
-      if (document.execCommand && document.execCommand('insertText', false, text)) return true;
-    } catch (e) {}
+      const s = String(input.textContent || input.value || '');
+      return s.length + ':' + s.slice(-24);
+    } catch (e) { return ''; }
+  }
+  /* 【必须等一拍再比】Slate 拿到事件后先改内部 model,
+   * DOM 由 React 异步重绘 —— dispatchEvent 后立即比 textContent 会看到“没变”,
+   * 于是又去试下一条通道 → 最后插两遍。 */
+  function tick() { return new Promise((r) => setTimeout(r, 40)); }
+
+  async function insertIntoComposer(text) {
+    const input = composerEl();
+    if (!input) return false;
+    caretToEnd(input);
+    /* 逐条试, 哪条让输入框真的变了就停。
+     * 不能只看 dispatchEvent 有没报错 —— 那个永远成功,
+     * Firefox 上正是「事件发出去了但剪贴板是空的」。 */
+    for (const pair of INSERT_CHANNELS) {
+      const name = pair[0], fn = pair[1];
+      const before = composerSig(input);
+      let ok = false;
+      try { ok = fn(input, text); } catch (e) { ok = false; }
+      if (!ok) continue;
+      await tick();
+      if (composerSig(input) !== before) { stamp('insert', name); return true; }
+    }
+    stamp('insert', 'all-failed');
     return false;
   }
 
@@ -1423,15 +1708,64 @@
   function emojiCdnUrl(id, animated) {
     return 'https://cdn.discordapp.com/emojis/' + id + (animated ? '.gif' : '.webp') + '?size=96';
   }
-  /** 这个表情是不是被锁 (需要我们接手) */
-  function emojiLocked(host) {
+  /** 表情格子 → 真正带 data-id / data-animated 的那个宿主元素
+   * 劫持与打标必须用同一个宿主, 否则标记写在 A 上、点击时查 B 就白写了。 */
+  function emojiHost(item) {
+    if (!item) return item;
+    if (item.matches && item.matches('button[data-type="emoji"]')) return item;
+    return (item.querySelector && item.querySelector('button[data-type="emoji"]')) || item;
+  }
+
+  /** Discord 自己的锁信号 (只读实时状态, 不含我们写的标记) */
+  function emojiLockedLive(host) {
     if (!host) return false;
-    if (host.getAttribute('aria-disabled') === 'true') return true;
-    if (host.querySelector('[class*="emojiLockIcon"]')) return true;
-    if (host.closest('[class*="NitroLocked"]')) return true;
-    const li = host.closest('li');
+    if (host.getAttribute && host.getAttribute('aria-disabled') === 'true') return true;
+    if (host.querySelector && host.querySelector('[class*="emojiLockIcon"]')) return true;
+    if (host.closest && host.closest('[class*="NitroLocked"]')) return true;
+    const li = host.closest && host.closest('li');
     if (li && li.querySelector('[class*="emojiLockIcon"]')) return true;
     return false;
+  }
+
+  /** 把锁信号固化到 data-moe-lock 上
+   * 存【当时那个表情的 id】而不是布尔: 表情面板是虚拟滚动,
+   *   React 会把同一个 button 节点复用给别的表情 —— 只存 '1' 的话滚一下
+   *   就会把没锁的表情也当成锁的, 于是本可原生发的表情反而被换成链接。 */
+  function markEmojiLock(host) {
+    if (!host || !host.getAttribute) return;
+    const sig = (host.dataset && host.dataset.id) || '1';
+    if (emojiLockedLive(host)) { host.setAttribute('data-moe-lock', sig); return; }
+    const had = host.getAttribute('data-moe-lock');
+    if (had === null) return;
+    /* 还是同一个表情 → 保留标记: 信号消失只是因为下面把 aria-disabled 摘了。
+     * 换了表情 (id 不同) → 节点被复用, 旧标记必须清掉。 */
+    if (had !== sig) host.removeAttribute('data-moe-lock');
+  }
+
+  /** 这个表情是不是被锁 (需要我们接手)
+   * 【主人报的 bug】所有「解锁了的」表情/贴纸插不出链接, 发出去对方看不到图。
+   * 【实页诊断实测 2026-09】点本服动图表情 (data-animated=true, 需 Nitro):
+   *     insertStamp = null   ← 我们的 insertIntoComposer 根本没跑 (它每次都会 stamp)
+   *     输入框只多了 12 个字符 ← CDN 链接 60+ 字符, 那是 Discord 自己插的 :name:
+   *     ariaDisabled = null  ← 锁信号不在了
+   *   → emojiLocked() 返回 false, 我们根本没接手, 文本形式服务端不解析。
+   * 【自己担的锅】unlockEmoji() 每 1.2s + 每次 DOM 变动都跑
+   *   removeAttribute('aria-disabled') —— 而 aria-disabled 正是这里最主要的锁信号。
+   *   面板一渲染它就被我们自己擦掉, 等主人点下去时已无从判断。
+   *   (剩下两条: 按钮内 emojiLockIcon —— 实测 hasLockIcon=false;
+   *    NitroLocked 分区 —— 本服表情不在里面。)
+   * 【修法】固化在前、擦除在后: 先把锁信号连同表情 id 写进 data-moe-lock,
+   *   再摘 aria-disabled。判定时优先读这个标记, 读不到才看实时信号。
+   *   同时给诊断加了 data-hijack (take/free/no-id/lottie), 下次实页一眼就能看出
+   *   到底有没有接管, 不用再从 insertStamp 是空倒推。 */
+  function emojiLocked(host) {
+    if (!host) return false;
+    const mark = host.getAttribute && host.getAttribute('data-moe-lock');
+    if (mark !== null && mark !== undefined) {
+      const sig = (host.dataset && host.dataset.id) || '1';
+      if (mark === sig) return true;
+    }
+    return emojiLockedLive(host);
   }
   function hijackEmojiClicks() {
     try {
@@ -1441,15 +1775,15 @@
           if (!t || !t.closest) return;
           const item = t.closest('button[data-type="emoji"], [class*="emojiItem"], li[role="gridcell"]');
           if (!item) return;
-          const btn = item.matches('button[data-type="emoji"]') ? item : item.querySelector('button[data-type="emoji"]');
-          const host = btn || item;
-          if (!emojiLocked(host)) return;                // 能用的让 Discord 原生处理
+          const host = emojiHost(item);
+          if (!emojiLocked(host)) { stamp('hijack', 'emoji:free'); return; }   // 能用的让 Discord 原生处理
           const id = host.dataset ? host.dataset.id : '';
-          if (!id) return;                               // 拿不到 id 就不插, 宁可不做
+          if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
           const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
-          insertIntoComposer(emojiCdnUrl(id, animated) + ' ');   // 不弹 toast (主人要求)
+          stamp('hijack', 'emoji:take' + (animated ? ':gif' : ''));
+          insertIntoComposer(emojiCdnUrl(id, animated) + ' ').catch(() => {});   // 不弹 toast (主人要求)
         } catch (err) {}
       }, true);
     } catch (e) {}
@@ -1501,14 +1835,15 @@
            * (9 张里有 2 张不一致)。guild_id 只作辅助。 */
           const node = el.querySelector('[class*="stickerNode"]') || el.closest('[class*="stickerNode"]');
           const unsendable = !!(node && /stickerUnsendable/.test(node.getAttribute('class') || ''));
-          if (!unsendable) return;                       // Discord 说能发 → 交回原生
+          if (!unsendable) { stamp('hijack', 'sticker:free'); return; }   // Discord 说能发 → 交回原生
           const ent = stickerEntity(el);
           const fmt = el.dataset.formatType || (ent && ent.format_type) || 1;
           const url = stickerCdnUrl(el.dataset.id, fmt);
-          if (!url) return;                              // Lottie 等不可链接化 → 交回 Discord
+          if (!url) { stamp('hijack', 'sticker:lottie'); return; }        // Lottie 等不可链接化 → 交回 Discord
           e.preventDefault();
           e.stopPropagation();
-          insertIntoComposer(url + ' ');
+          stamp('hijack', 'sticker:take:' + fmt);
+          insertIntoComposer(url + ' ').catch(() => {});
         } catch (err) {}
       }, true);
     } catch (e) {}

@@ -17,7 +17,10 @@
 const CONTEXT_MENU_ID = 'moe-decode-image';
 
 const dbg = {
-  version: '3.6.3',
+  /* 【不能硬编码】这个字段直接显在 popup 顶部。
+   * 之前写死成 '3.6.3', manifest 已经到 3.6.6 —— 主人看的面板一直在报旧版号,
+   * 恰好是「到底加载的是哪个版本」最需要可信的地方。直接读 manifest。 */
+  version: (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return '?'; } })(),
   mode: '页面内拦截 (XHR + fetch seam)',
   tracked: 0, encoded: 0, uploadsSeen: 0, uploadsReplaced: 0, uploadsPass: 0,
   lastFile: '', lastSize: 0, lastReplace: '', lastError: '', lastTime: '', lastReview: '',
@@ -161,7 +164,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (t.ev === 'tracked') { dbg.tracked++; dbg.lastFile = t.name || ''; dbg.lastSize = t.size || 0; }
     else if (t.ev === 'encoded') { dbg.encoded++; dbg.lastReplace = (t.name || '') + ' → ' + (t.newSize || 0) + 'B ' + (t.w || 0) + 'x' + (t.h || 0); }
     else if (t.ev === 'upload-seen') { dbg.uploadsSeen++; }
-    else if (t.ev === 'upload-replaced') { dbg.uploadsReplaced++; dbg.lastReplace = t.info || dbg.lastReplace; }
+    /* obf=false 是原图直通, 不算「已替换」—— 否则面板会说谎 */
+    else if (t.ev === 'upload-replaced') {
+      if (t.obf === false) { dbg.uploadsPass++; dbg.lastReplace = '原图直传 ' + (t.kb || ''); }
+      else { dbg.uploadsReplaced++; dbg.lastReplace = t.info || dbg.lastReplace; }
+    }
     else if (t.ev === 'upload-pass') { dbg.uploadsPass++; dbg.lastError = t.why || dbg.lastError; }
     else if (t.ev === 'error') { dbg.lastError = String(t.msg || '').slice(0, 200); }
     else if (t.ev === 'review') { dbg.lastReview = (t.source || '') + ' ' + t.score + ' → ' + (t.obfuscate ? '混淆' : '直通'); }

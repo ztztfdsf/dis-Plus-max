@@ -115,11 +115,55 @@ test('审查: 大面积平滑肤色 → 高分; 风景/UI/花衣服 → 低分',
   assert.ok(review.localScore(cloth).score < 0.3, '花衣服应低分');
 });
 
-test('审查: nsfwOnly=false 时一律混淆 (默认策略)', async () => {
+test('审查: nsfwOnly 关掉/缺失时一律混淆 (保守兵库)', async () => {
+  /* 注意这不是「默认值」的测试 —— v3.6.8 起 nsfwOnly 默认为 true。
+   * 这里测的是 decide() 的兵库行为: 拿不到配置时宁可全混淆,
+   * 而不是当成“只混淆高分图”把图直发出去。 */
   const sky = paint(200, 150, () => [80, 150, 230]);
   const r = await review.decide(sky, {});
-  assert.strictEqual(r.obfuscate, true);
+  assert.strictEqual(r.obfuscate, true, '空 cfg → 全混淆');
   assert.strictEqual(r.source, 'always');
+  // 显式关掉 → 也是全混淆
+  const off = await review.decide(sky, { nsfwOnly: false });
+  assert.strictEqual(off.obfuscate, true, '开关关掉 → 全混淆 (一张不漏)');
+  assert.strictEqual(off.source, 'always');
+  // 传了个非布尔的杂值 → 仍然保守 (不能被 'true' 字符串之类骷过去)
+  const weird = await review.decide(sky, { nsfwOnly: 'true' });
+  assert.strictEqual(weird.obfuscate, true, '字符串 "true" 不算开启 → 仍全混淆');
+});
+
+test('审查默认值: 新装就该是「只混淆色情图片」= 开 (v3.6.8 行为变更)', () => {
+  /* 【主人要求】默认勾上。四处默认值必须一致, 否则会出现
+   *   弹窗显示勾上、实际行为却是全混淆 这种“界面说谎”。
+   * 这里直接读源文件比对 —— 因为它们分布在四个不同运行环境
+   *   (content.js 隔离世界 / options.js 设置页 / popup.js 弹窗 / hook.js 主世界),
+   *   单测里没法把四个都跑起来。 */
+  const read = (p) => fs.readFileSync(path.join(__dirname, '..', 'src', p), 'utf8');
+
+  // 1) content.js 与 options.js 的 DEFAULTS 必须是 true
+  for (const f of ['content.js', 'options.js']) {
+    const s = read(f);
+    assert.ok(/nsfwOnly:\s*true/.test(s), f + ' 的 DEFAULTS 里 nsfwOnly 必须为 true');
+    assert.ok(!/nsfwOnly:\s*false/.test(s), f + ' 里不得再有 nsfwOnly: false');
+  }
+
+  // 2) popup.js 读取时必须用 !== false 而不是 === true
+  //    === true 的语义是“没存过就算关” → 新装的人看到未勾选 (跟默认值矛盾)
+  const popup = read('popup.js');
+  assert.ok(/t-nsfwOnly'\)\.checked = v\.nsfwOnly !== false/.test(popup),
+    'popup.js 读 nsfwOnly 要用 !== false (与其他默认开的开关一致)');
+  assert.ok(!/v\.nsfwOnly === true/.test(popup),
+    'popup.js 不得再用 === true (那会让新装的人看到未勾选)');
+
+  // 3) hook.js 是主世界兵库, 故意保留 false —— 配置同步前宁可全混淆
+  const hook = read('hook.js');
+  assert.ok(/nsfwOnly:\s*false/.test(hook),
+    'hook.js 的初值应保留 false: 配置还没送到时宁可全混淆, 不能漏发原图');
+
+  // 4) review.js 的门禁仍用 !== true (拿不到配置时保守)
+  const rev = read('review.js');
+  assert.ok(/cfg\.nsfwOnly !== true/.test(rev),
+    'review.js 内部判定仍用 !== true: 未传配置时要全混淆');
 });
 
 test('审查: nsfwOnly=true 时按分数决定', async () => {
@@ -233,7 +277,8 @@ test('流程: 审查判定混淆 → 审查先于编码, 且编码只跑 1 次',
   assert.strictEqual(calls.encode, 1);
 });
 
-test('流程: 关闭审查 (默认) → 所有图都混淆, 但仍是先判定后编码', async () => {
+test('流程: 关掉审查 → 所有图都混淆, 但仍是先判定后编码', async () => {
+  // (v3.6.8 起审查默认是开的; 这里测的是【关掉后】的流程)
   const { pipeline, calls } = makeSpyPipeline();
   const r = await pipeline(SKY(), [], {});
   assert.strictEqual(r.action, 'obfuscated');
@@ -521,6 +566,64 @@ test('快速 PNG 编码器: 产物合法 + 往返无损 + 可叠加标记块', a
   assert.ok(core.pngReadMarker(u8, 'fp'), 'moEg 可读');
   assert.ok(core.pngReadMetaChunks(u8), 'moMt 可读');
   assertPixelEqual(decodeImage(pngDecode(Buffer.from(u8)), { salt: 'fp' }), orig, '带标记块往返');
+});
+
+/* ---------- 跳 realm 回归 (Firefox 隔离世界) ----------
+ * Firefox 152 实测: 隔离世界把本 realm 的 TypedArray 交给页面 realm 的
+ * CompressionStream writer 时, 参数转换直接拒收:
+ *   TypeError: Value could not be converted to any of: ArrayBufferView, ArrayBuffer.
+ * 这里把 WritableStreamDefaultWriter.prototype.write 换成同样拒收 TypedArray 的版本,
+ * 在 Node 里复现那个环境 —— 编码器必须仍然能干活 (走 Blob 输入, 不碰公开 writer)。 */
+test('跳 realm: writer.write 拒收 TypedArray 时 encodePngFast 仍需成功', async () => {
+  if (typeof CompressionStream === 'undefined' || typeof WritableStreamDefaultWriter === 'undefined') {
+    console.log('       (无 CompressionStream/WritableStreamDefaultWriter, 跳过)');
+    return;
+  }
+  const proto = WritableStreamDefaultWriter.prototype;
+  const origWrite = proto.write;
+  let rejected = 0;
+  proto.write = function (chunk) {
+    if (chunk && chunk.buffer instanceof ArrayBuffer) {
+      rejected++;
+      return Promise.reject(new TypeError('Value could not be converted to any of: ArrayBufferView, ArrayBuffer.'));
+    }
+    return origWrite.call(this, chunk);
+  };
+  try {
+    const orig = makeData(96, 72, 'xrealm');
+    const enc = encodeImage(orig, { salt: 'xr' });
+    const u8 = await core.encodePngFast(enc);
+    assert.ok(core.isPng(u8), '仍产出合法 PNG');
+    assertPixelEqual(decodeImage(pngDecode(Buffer.from(u8)), { salt: 'xr' }), orig, '跳 realm 下往返无损');
+    // 反面断言: 旧写法 (writer.write(typedArray)) 在这个环境里必须真的挂
+    let oldFailed = false;
+    try {
+      const cs = new CompressionStream('deflate');
+      const wr = cs.writable.getWriter();
+      await wr.write(new Uint8Array([1, 2, 3]));
+    } catch (e) { oldFailed = /could not be converted/.test(e.message); }
+    assert.ok(oldFailed, '旧写法必须在此环境报错 (否则回归测试本身失效)');
+    assert.ok(rejected > 0, '补丁确实生效过');
+  } finally {
+    proto.write = origWrite;
+  }
+});
+
+test('约 JS 傅底编码器 encodePngStore: 无任何浏览器 API 也能无损出 PNG', () => {
+  const orig = makeData(128, 96, 'storepng');
+  const enc = encodeImage(orig, { salt: 'st' });
+  const u8 = core.encodePngStore(enc);
+  assert.ok(core.isPng(u8), '是合法 PNG');
+  const parsed = pngDecode(Buffer.from(u8));
+  assert.strictEqual(parsed.width, enc.width, '宽一致');
+  assert.strictEqual(parsed.height, enc.height, '高一致');
+  let px = 0;
+  for (let i = 0; i < enc.data.length; i++) if (enc.data[i] !== parsed.data[i]) px++;
+  assert.strictEqual(px, 0, 'store 不改像素');
+  assertPixelEqual(decodeImage(parsed, { salt: 'st' }), orig, 'store 往返无损');
+  // 叠标记块后仍可识别 (回落产物也得能被对方预筛到)
+  const marked = core.pngAddMarker(u8, enc.meta);
+  assert.ok(core.pngReadMarker(marked, 'st'), 'moEg 可读');
 });
 
 test('v3 默认 tile 降到 256: 补边浪费显著变小, 旧图(T=1024) 仍可解', () => {
@@ -888,45 +991,534 @@ test('Firefox 预览取字节: 全失败也要挂上 UI, 不能静默死', () =>
   assert.strictEqual(label(true, { manual: true }, false), '手动·原', '用户手动推翻后按手动显示');
 });
 
-test('Firefox 解码: ImageData 必须与 canvas 同 realm', () => {
-  /* 【Firefox 无法解码的真因】(诊断面板原话)
+test('Firefox 解码: 像素字节必须先过 realm 桥 (cloneInto)', () => {
+  /* 【Firefox 无法解码的真因】诊断面板原话:
    *   dec:CanvasRenderingContext2D.putImageData:
    *   Failed to extract Uint8ClampedArray from ImageData (security check failed?)
    *
-   * 隔离世界(content script)与页面是不同 realm。
-   * document.createElement('canvas') 拿到的 canvas 属于【页面 realm】(带 Xray 包装),
-   * 而 new ImageData(...) 造出来的是【隔离世界】的对象 →
-   * putImageData 时 Firefox 无法跨 realm 取出里面的 Uint8ClampedArray, 直接抛。
-   * Chrome 的隔离世界没有这层限制, 所以之前一直没暴露。
+   * Firefox 152 用临时扩展逐步探针实测 (隔离世界):
+   *   ctx.createImageData(w,h).data.set(沙箱数组)  → Permission denied to access object
+   *   new ImageData(沙箱数组,w,h) → putImageData    → Failed to extract Uint8ClampedArray…
+   *   cloneInto(沙箱数组, window.wrappedJSObject) 后两者都 ✓
    *
-   * 修法: 用 ctx.createImageData() 让 ImageData 与 ctx 同 realm, 再 .data.set() 灌像素。 */
-  const mkCtx = (crossRealmOk) => ({
-    createImageData: (w, h) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4), _realm: 'ctx' }),
+   * 拒收点不是「谁造的 ImageData」而是「字节属于哪个 realm」——
+   * 所以 v3.6.3 只把 new ImageData 换成 ctx.createImageData 是无效的:
+   * 报错只是从 putImageData 前移到 .data.set(), 而那句外面包了 try/catch,
+   * 失败后又退回 new ImageData 路 → 报同一句话。
+   * 下面用带 realm 标记的假 ctx 复现这一整套语义。 */
+  const PAGE = 'page';
+  // 页面 realm 的字节容器: set() 只接受同 realm 的源
+  const mkPageBytes = (n) => {
+    const buf = new Uint8ClampedArray(n);
+    return {
+      _realm: PAGE, length: n,
+      set(src) {
+        if (src._realm !== PAGE) throw new Error('Permission denied to access object');
+        buf.set(src.bytes);
+      },
+      get bytes() { return buf; },
+    };
+  };
+  const mkCtx = () => ({
+    createImageData: (w, h) => ({ width: w, height: h, data: mkPageBytes(w * h * 4), _realm: PAGE }),
     putImageData: (id) => {
-      if (id._realm !== 'ctx' && !crossRealmOk) throw new Error('Failed to extract Uint8ClampedArray from ImageData (security check failed?)');
-      return 'ok';
+      if (id.data._realm !== PAGE) {
+        throw new Error('Failed to extract Uint8ClampedArray from ImageData (security check failed?)');
+      }
+      return Array.from(id.data.bytes);
     },
   });
-  const src = { width: 2, height: 2, data: new Uint8ClampedArray(16).fill(7) };
+  // 沙箱 realm 的像素 (我们算出来的解码结果)
+  const sandbox = { _realm: 'sandbox', bytes: new Uint8ClampedArray([9, 8, 7, 255]), length: 4 };
+  const cloneIntoStub = (v) => ({ _realm: PAGE, bytes: v.bytes, length: v.length });
 
-  // 正确写法: 同 realm → Firefox 与 Chrome 都过
-  const draw = (ctx) => {
-    let id = null;
-    try { id = ctx.createImageData(src.width, src.height); id.data.set(src.data); } catch (e) { id = null; }
-    if (!id) id = { width: src.width, height: src.height, data: src.data, _realm: 'isolated' };
+  // ✅ 正确写法: 先过桥, 再灌进同 realm 的 ImageData
+  const draw = (ctx, bridge) => {
+    const id = ctx.createImageData(1, 1);
+    id.data.set(bridge(sandbox));
     return ctx.putImageData(id);
   };
-  assert.strictEqual(draw(mkCtx(false)), 'ok', 'Firefox(严格跨realm): 用 ctx.createImageData 才过');
-  assert.strictEqual(draw(mkCtx(true)), 'ok', 'Chrome(宽松): 同样过');
+  assert.deepStrictEqual(draw(mkCtx(), cloneIntoStub), [9, 8, 7, 255], 'cloneInto 后像素真的落到了 canvas');
 
-  // 旧写法(直接 new ImageData)在 Firefox 上必然抛 —— 反面断言, 防回归
-  const drawOld = (ctx) => ctx.putImageData({ width: 2, height: 2, data: src.data, _realm: 'isolated' });
-  assert.throws(() => drawOld(mkCtx(false)), /security check failed/, '旧写法在 Firefox 上会抛');
-  assert.strictEqual(drawOld(mkCtx(true)), 'ok', '旧写法只在 Chrome 上侥幸能跑');
+  // ❌ 反面断言 1: 不过桥直接 set → Permission denied (v3.6.3 就死在这)
+  assert.throws(() => draw(mkCtx(), (v) => v), /Permission denied/, '不过桥: .data.set 就被拒');
 
-  // 像素必须真的搬过去, 不能只是不报错
-  const ctx = mkCtx(false);
-  const id = ctx.createImageData(2, 2);
-  id.data.set(src.data);
-  assert.deepStrictEqual(Array.from(id.data), Array.from(src.data), '灌进去的像素要一致');
+  // ❌ 反面断言 2: 拿沙箱数组自己造 ImageData → 报那句经典错误
+  assert.throws(
+    () => mkCtx().putImageData({ width: 1, height: 1, data: sandbox, _realm: 'sandbox' }),
+    /Failed to extract Uint8ClampedArray/,
+    '沙箱 ImageData 直接 put → 就是用户看到的报错');
+
+  // 主世界/Chrome: 没有 wrappedJSObject → 桥退化为原样返回, 零开销
+  const noBridge = (u8) => u8;
+  assert.strictEqual(noBridge(sandbox), sandbox, '无 realm 边界时桥不拷贝');
 });
+
+test('Firefox 解码: PNG 编码三级回落且失败原因不得吞掉', () => {
+  /* 旧版只有两级, 且 encodePngFast 失败时静默回落 canvas →
+   * 真正的首发异常被吞, 只能看到下游 putImageData 报错
+   * → 一路误判成「new Response(stream) 在隔离世界不行」。
+   * 现在: fast → canvas → store, 每级原因都拼进 lastFastPngErr。 */
+  function encodePng(avail) {
+    const errs = [];
+    for (const [name, ok] of [['fast', avail.fast], ['canvas', avail.canvas], ['store', avail.store]]) {
+      if (ok) return { path: name, err: errs.join(' | ') };
+      errs.push(name + ':boom');
+    }
+    return { path: 'none', err: errs.join(' | ') };
+  }
+  assert.strictEqual(encodePng({ fast: 1, canvas: 1, store: 1 }).path, 'fast', 'Chrome: 走最快的');
+  const ff = encodePng({ fast: 0, canvas: 0, store: 1 });
+  assert.strictEqual(ff.path, 'store', '两级都挂 → 纯 JS 兜底仍能出图');
+  assert.strictEqual(ff.err, 'fast:boom | canvas:boom', '两级失败原因都得留下来');
+  assert.strictEqual(encodePng({ fast: 0, canvas: 1, store: 1 }).err, 'fast:boom', '即使成功也要留首发异常');
+  assert.strictEqual(encodePng({ fast: 0, canvas: 0, store: 0 }).path, 'none', '全挂时得明确报错');
+});
+
+/* ---------- 跨 realm: Blob 字节必须先拷成本 realm ----------
+ * Firefox 152 实测 (隔离世界):
+ *   const u8 = new Uint8Array(await blob.arrayBuffer());
+ *   u8.length / u8[i] / for 循环求和   → 全部正常
+ *   u8.subarray(a, b)                 → Error: Permission denied to access property "constructor"
+ *   new TextDecoder().decode(u8.sub…) → 同上
+ * (TypedArray 派生要读 @@species 构造器, 跨 realm 不给访问;
+ *  Response / FileReader / ab.slice(0) 拿到的 buffer 同样如此,
+ *  只有 u8.set(跨realm视图) / Uint8Array.from / structuredClone / blob.stream() 是干净的)
+ *
+ * 后果: core.js 的 PNG chunk 读写全靠 subarray + TextDecoder, 而调用点全是 try/catch →
+ *   moEg / moMt 静默丢失。混淆图发出去对方预筛读不到标记 → 根本不触发解码。
+ *   这就是「像素往返 PIXEL-PERFECT 但 metaChunks MISS」的真因。
+ *
+ * 这里用一个 subarray 会抛的 Uint8Array 子类模拟那种视图, 断言:
+ *   1. 直接喂 → PNG chunk 相关能力真的会挂 (反面断言, 防回归)
+ *   2. 过一次 .set() 拷贝 → 全部恢复正常
+ */
+test('跨 realm: Blob 字节直接用会让 moEg/moMt 静默丢失, 拷一次就好', async () => {
+  class XrayView extends Uint8Array {
+    subarray() { throw new Error('Permission denied to access property "constructor"'); }
+    slice() { throw new Error('Permission denied to access property "constructor"'); }
+  }
+  const orig = makeData(48, 32, 'xrayblob');
+  const enc = encodeImage(orig, { salt: 'xb' });
+  const chunks = [{ k: 'workflow', v: '{"seed":42,"中文":"喵"}' }];
+
+  // 正常字节: 插标记 + 元数据 → 都读得回来 (基线)
+  let clean = new Uint8Array(writePng(enc));
+  clean = core.pngPutTextChunks(clean, chunks);
+  clean = core.pngAddMarker(clean, enc.meta);
+  assert.ok(core.pngReadMarker(clean, 'xb'), '基线: moEg 可读');
+  assert.deepStrictEqual(core.pngReadMetaChunks(clean), chunks, '基线: moMt 可读');
+
+  // 模拟隔离世界从 blob 直接拿到的视图
+  const hostile = new XrayView(clean.length);
+  hostile.set(clean);
+  assert.strictEqual(hostile.length, clean.length, '视图长度正常');
+  assert.strictEqual(hostile[0], 0x89, '下标读取正常 (所以问题很隐蔽)');
+
+  // ❌ 反面断言: moMt 读不出来 (subarray 被拒 → 外层 try/catch 吞掉 → 返回 null)
+  assert.strictEqual(core.pngReadMetaChunks(hostile), null, '直接用: moMt 静默丢失');
+  // ❌ 反面断言: 往里插块也会挂 (pngAddMarker 内部靠 subarray 搬字节)
+  assert.throws(() => core.pngAddMarker(hostile, enc.meta), /Permission denied/, '直接用: 插 moEg 会抛');
+
+  // ✅ 拷一次到本 realm → 一切恢复
+  const copied = new Uint8Array(hostile.length);
+  copied.set(hostile);                                  // set(跨realm视图) 是允许的
+  assert.ok(core.pngReadMarker(copied, 'xb'), '拷贝后: moEg 可读');
+  assert.deepStrictEqual(core.pngReadMetaChunks(copied), chunks, '拷贝后: moMt 可读');
+  const marked = core.pngAddMarker(copied, enc.meta);
+  assert.ok(core.isPng(marked), '拷贝后: 插块正常');
+  // 内容键也得一致 (contentKey 只用下标循环, 两者本来就该相等)
+  assert.strictEqual(core.contentKey(copied), core.contentKey(clean), '拷贝不改内容键');
+});
+
+/* ---------- 消息归属: 带回复的消息不能把被回复者当成作者 ----------
+ * 【现象】切到另一个账号看别人发的混淆图, 徽标写「已混淆」而不是「已解析」。
+ * 【真因】拓下来的真实 DOM 顺序 (2026-09):
+ *     div.message__…hasReply_
+ *       └ div.repliedMessage_ → img.replyAvatar_   ← 被回复者, 先出现!
+ *       └ div.contents_       → img.avatar_        ← 真作者
+ *   旧写法 anchor.querySelector('img[src*="/avatars/"]') 拿到第一个 = 被回复者。
+ *   样本统计: 8 条带回复的消息, 8 条第一个头像都是 replyAvatar,
+ *     其中 1 条被回复者正好是我 → 别人的图被标成「已混淆」。
+ */
+test('归属判定: 带回复的消息取 contents 内的作者头像, 不能取 replyAvatar', () => {
+  const ME = '1443679787548803234';
+  const OTHER = '740577126448627712';
+
+  /* 极简 DOM 模型: 只实现 querySelector 需要的那点语义 */
+  function el(cls, kids) {
+    return { cls: cls, kids: kids || [], isImg: false };
+  }
+  function img(cls, userId) {
+    return { cls: cls, kids: [], isImg: true, src: 'https://cdn.discordapp.com/avatars/' + userId + '/x.webp?size=80' };
+  }
+  function walk(node, hit, out) {
+    for (const k of node.kids) {
+      if (hit(k)) { out.push(k); }
+      walk(k, hit, out);
+    }
+  }
+  function q(node, hit) {
+    const out = [];
+    walk(node, hit, out);
+    return out[0] || null;
+  }
+  const isAvatar = (n) => n.isImg && /\/avatars\//.test(n.src);
+  const isReplyAvatar = (n) => isAvatar(n) && /replyAvatar/.test(n.cls);
+  const isAuthorAvatar = (n) => isAvatar(n) && !/replyAvatar/.test(n.cls);
+  const isContents = (n) => /contents/.test(n.cls);
+
+  // 别人(OTHER)发的消息, 回复的是我(ME)
+  const msg = el('message__5126c hasReply_c19a55', [
+    el('repliedMessage_c19a55', [img('replyAvatar_c19a55 clickable_c19a55', ME)]),
+    el('contents_c19a55', [img('avatar_c19a55 clickable_c19a55', OTHER)]),
+  ]);
+
+  const uid = (n) => (n ? n.src.match(/\/avatars\/(\d+)\//)[1] : null);
+
+  // ❌ 旧写法: 命中 replyAvatar → 判成「我发的」
+  assert.strictEqual(uid(q(msg, isAvatar)), ME, '旧写法确实先命中被回复者 (这就是 bug)');
+
+  // ✅ 新写法: 先缩到 contents 容器, 再排 replyAvatar
+  function authorAvatar(scope) {
+    const box = q(scope, isContents) || scope;
+    return q(box, isAuthorAvatar) || q(scope, isAuthorAvatar);
+  }
+  assert.strictEqual(uid(authorAvatar(msg)), OTHER, '新写法拿到真作者 → 标「已解析」');
+  assert.strictEqual(uid(authorAvatar(msg)) === ME, false, '不会误判成我发的');
+
+  // 我自己发的带回复消息: 仍要正确识别为「我的」
+  const mineMsg = el('message__5126c hasReply_c19a55', [
+    el('repliedMessage_c19a55', [img('replyAvatar_c19a55', OTHER)]),
+    el('contents_c19a55', [img('avatar_c19a55', ME)]),
+  ]);
+  assert.strictEqual(uid(authorAvatar(mineMsg)), ME, '我发的仍判为我 → 标「已混淆」');
+
+  // 无回复的普通消息: 两种写法都对 (不能因为修 bug 把简单情形弄坏)
+  const plain = el('message__5126c', [el('contents_c19a55', [img('avatar_c19a55', OTHER)])]);
+  assert.strictEqual(uid(q(plain, isAvatar)), OTHER, '普通消息旧写法本来也对');
+  assert.strictEqual(uid(authorAvatar(plain)), OTHER, '普通消息新写法一致');
+
+  // 合并组的后续消息: 没有任何头像 → 必须回退到往上找, 且往上也要排 replyAvatar
+  const grouped = el('message__5126c', [el('contents_c19a55', [])]);
+  assert.strictEqual(authorAvatar(grouped), null, '合并组消息本身没头像 → 交给上溯逻辑');
+});
+
+test('归属判定: fiber 优先于头像 (头像可能根本不存在)', () => {
+  /* React fiber 里 message.author.id 是权威值。
+   * ⚠️ Firefox 隔离世界【看不到】DOM 节点上的 React expando:
+   *     Object.keys(node) 里没有 __reactFiber$… (探针实测 NONE)
+   *   必须 node.wrappedJSObject 穿透才能读到 → 探针实测穿透后 author.id 正常。 */
+  const ME = 'me-123';
+  function fiberAuthorId(node) {
+    // 模拟: 沙箱直接看不到 expando, 只有 wrappedJSObject 上有
+    const view = node.wrappedJSObject || node;
+    const key = Object.keys(view).find((k) => k.indexOf('__reactFiber$') === 0);
+    if (!key) return '';
+    let f = view[key];
+    for (let i = 0; i < 14 && f; i++) {
+      const m = f.memoizedProps && f.memoizedProps.message;
+      if (m && m.author && m.author.id) return String(m.author.id);
+      f = f.return;
+    }
+    return '';
+  }
+  // 沙箱视角: 节点自身没有 expando, 藏在 wrappedJSObject 后面
+  const inner = { '__reactFiber$k': { memoizedProps: { message: { author: { id: ME } } }, return: null } };
+  const node = { wrappedJSObject: inner };
+  assert.strictEqual(fiberAuthorId(node), ME, '穿透 wrappedJSObject 能读到 author.id');
+
+  // 没有 wrappedJSObject (Chrome / 主世界) → 直接读自身
+  const chromeNode = { '__reactFiber$k': { memoizedProps: { message: { author: { id: ME } } }, return: null } };
+  assert.strictEqual(fiberAuthorId(chromeNode), ME, 'Chrome 直接读自身 expando');
+
+  // 沙箱看不到 (没穿透) → 返回空字符串, 让调用方回落 DOM 头像
+  const blind = { '__reactFiber$k': undefined };
+  assert.strictEqual(fiberAuthorId(blind), '', '读不到 fiber → 空串, 回落 DOM');
+
+  // fiber 要能沿 return 链往上找 (图片本身的 fiber 上没有 message)
+  const chained = {
+    '__reactFiber$k': {
+      memoizedProps: { src: 'x.png' },
+      return: { memoizedProps: {}, return: { memoizedProps: { message: { author: { id: ME } } }, return: null } },
+    },
+  };
+  assert.strictEqual(fiberAuthorId(chained), ME, '沿 fiber.return 上溯能找到 message');
+});
+
+/* ---------- 输入框插文本: Firefox 的 ClipboardEvent 带不动数据 ----------
+ * 【现象】火狐里回复别人消息时, 表情/贴纸的图片链接发不出去。
+ * 【真因】(Firefox 152 探针实测)
+ *   new ClipboardEvent('paste', { clipboardData: dt })
+ *     → 页面端 e.clipboardData.types === ""  (空!)
+ *   连让【页面 realm 自己】造也是空的 → 不是跨 realm 问题,
+ *   而是 Gecko 的 ClipboardEvent 构造器不实现 clipboardData 这个 init 成员
+ *   (Chrome 实现了 → 所以旧写法只在 Chrome 能跑)。
+ *   Slate 拿到空剪贴板 → model 不更新 → 发出去是空的。
+ * 【修法】造完再 defineProperty 盖 clipboardData; 且 DataTransfer 必须是页面 realm 的。
+ *   并且不能只看 dispatchEvent 有没抛 —— 那永远成功, 必须核对编辑器内容真的变了。
+ */
+test('插入输入框: 必须核对内容真变了, 而不是「事件发出去就算成功」', () => {
+  /* 模拟 Gecko: 构造器忽略 clipboardData, 只有 defineProperty 盖上的才生效 */
+  function geckoClipboardEvent(init) {
+    const ev = { type: 'paste', clipboardData: null, _init: init };
+    return ev;                                     // 构造器不认 init.clipboardData
+  }
+  function slateHandle(ev, model) {
+    const dt = ev.clipboardData;
+    const t = dt ? dt.data : '';
+    return t ? model + t : model;                  // 空剪贴板 → model 不变
+  }
+
+  // ❌ 旧写法: 构造器传 clipboardData → Gecko 忽略 → model 不变
+  let model = '';
+  const oldEv = geckoClipboardEvent({ clipboardData: { data: 'URL' } });
+  assert.strictEqual(slateHandle(oldEv, model), '', '旧写法在 Gecko 上 model 不变 (发不出去)');
+
+  // ✅ 新写法: 造完盖上去
+  const newEv = geckoClipboardEvent({});
+  newEv.clipboardData = { data: 'URL' };           // 等价于 defineProperty
+  assert.strictEqual(slateHandle(newEv, model), 'URL', '盖上 clipboardData 后 model 更新');
+
+  /* 通道回落: 只有真的改动了内容才算这条通道可用 */
+  function insert(channels) {
+    let content = '';
+    for (const ch of channels) {
+      const before = content;
+      if (!ch.dispatched) continue;                // 构造失败 → 下一条
+      if (ch.writes) content += ch.writes;
+      if (content !== before) return { used: ch.name, content: content };
+    }
+    return { used: 'none', content: content };
+  }
+  // Firefox: paste 通道事件发出去了但没写入 → 必须继续往下试
+  assert.strictEqual(
+    insert([
+      { name: 'paste', dispatched: true, writes: '' },
+      { name: 'beforeinput-text', dispatched: true, writes: 'URL' },
+    ]).used,
+    'beforeinput-text',
+    'paste 无效时自动落到 beforeinput');
+  // Chrome: paste 直接成功 → 不该继续
+  assert.strictEqual(
+    insert([
+      { name: 'paste', dispatched: true, writes: 'URL' },
+      { name: 'beforeinput-text', dispatched: true, writes: 'SHOULD-NOT-RUN' },
+    ]).content,
+    'URL',
+    'paste 成功就停, 不会插两遍');
+  // 全挂 → 明确 none (供诊断面板显示 insert=all-failed)
+  assert.strictEqual(insert([{ name: 'paste', dispatched: false }]).used, 'none', '全挂时报 none');
+});
+
+/* ---------- toast 文案不能自相矛盾 ----------
+ * 【现象】上传原图时弹「已混淆上传 · 原图 · 123KB」。
+ * 【真因】旧代码无论换没换体都拼 '已混淆上传 · ' + info,
+ *   而 info 里的 label 在直通时是「原图」→ 凑出矛盾话。
+ * 【修法】hook 端把 obf 布尔一起发过来, 由它决定文案。
+ */
+test('toast 文案: 原图直通不能说「已混淆上传」', () => {
+  function toastText(d) {
+    const kb = d.kb || '';
+    return d.obf === false ? ('原图直传' + (kb ? ' · ' + kb : ''))
+                           : ('已混淆上传' + (kb ? ' · ' + kb : ''));
+  }
+  assert.strictEqual(toastText({ obf: false, kb: '123KB' }), '原图直传 · 123KB', '直通说原图直传');
+  assert.strictEqual(toastText({ obf: true, kb: '85KB' }), '已混淆上传 · 85KB', '混淆说已混淆上传');
+  assert.ok(!/已混淆/.test(toastText({ obf: false, kb: '1KB' })), '直通文案里绝不出现「已混淆」');
+  // 旧写法留个反面断言, 防回归
+  const oldText = (label) => '已混淆上传 · ' + label;
+  assert.strictEqual(oldText('原图 · 123KB'), '已混淆上传 · 原图 · 123KB', '旧写法就是这句矛盾话');
+
+  /* 后台统计也得分开记: 直通不能计入 uploadsReplaced */
+  function tally(ev, dbg) {
+    if (ev.obf === false) dbg.pass++;
+    else dbg.replaced++;
+    return dbg;
+  }
+  const dbg = tally({ obf: false }, tally({ obf: true }, { replaced: 0, pass: 0 }));
+  assert.deepStrictEqual(dbg, { replaced: 1, pass: 1 }, '混淆记 replaced, 直通记 pass');
+});
+
+/* ---------- 徽标条: 必须在图外的头像槽里, 且不得重叠 ----------
+ * 【现象】「已混淆」角标与「下载」按钮叠在一起。
+ * 【真因】排上下靠的这行 —— const top = av ? (av.offsetTop + av.offsetHeight + 4) : 2;
+ *   #15 归属重构把同作用域的 av 删了 → ReferenceError。
+ *   而它在两个元素【已 append 进 DOM 之后】才执行, 又被外层 try/catch 吞掉
+ *   → top 永远没写上, 两个 absolute 元素 top:auto 一起塌在同一处。
+ *   实页诊断里这条 74 次: err="tag:av is not defined"。
+ * 【位置要求】主人要的是【图片外面】的头像槽 (Chrome v3.6.4 的样子)。
+ *   CDP 实测坐标: 消息 1126×419 / 角标 (16,48) / 下载 (16,68) / 图 (72,26) 522×348
+ *   → 角标在 x=16, 图从 x=72 开始, 角标完全在图外。
+ *   中间有一版改成“落在图内左上角”是改错了方向, 这里把“必须在图外”钉住。
+ * 【修法】位置不变, 但两个 chip 装进同一个 flex 列, 行距交给 gap
+ *   → 只需算一个 top, 结构上不可能再重叠。
+ */
+test('徽标条: 必须在图外的头像槽, 且角标与下载不得重叠', () => {
+  const CHIP_H = 16, GAP = 4, LEFT = 16;
+  const rect = (x, y, w, h) => ({ left: x, top: y, right: x + w, bottom: y + h, width: w, height: h });
+  const overlaps = (a, b) => !(a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top);
+
+  /* Chrome 实测的真实尺寸 (CDP 量的, 不是拍脑袋) */
+  const anchor = rect(0, 0, 1126, 419);
+  const avatar = rect(16, 4, 40, 40);              // 头像: off4+40
+  const img = rect(72, 26, 522, 348);              // 图片从 x=72 开始
+
+  /* ❌ 旧写法: av 报 ReferenceError → top 没写上 → 两个元素同位置 */
+  function oldPlace() {
+    const tag = { left: LEFT, top: null }, dl = { left: LEFT, top: null };
+    try {
+      const av = (function () { throw new ReferenceError('av is not defined'); })();
+      const top = av ? 48 : 2;
+      tag.top = top; dl.top = top + 20;
+    } catch (e) { return { tag: tag, dl: dl, err: e.message }; }
+    return { tag: tag, dl: dl, err: null };
+  }
+  const old = oldPlace();
+  assert.strictEqual(old.err, 'av is not defined', '旧代码确实就在这里报 ReferenceError');
+  assert.strictEqual(old.tag.top, null, 'top 根本没被赋上 (这就是重叠的根)');
+  assert.strictEqual(old.dl.top, null, '下载按钮的 top 也没赋上');
+  // top 都是 auto → 塌到同一处 → 矩形重合
+  assert.ok(overlaps(rect(LEFT, 0, 40, CHIP_H), rect(LEFT, 0, 30, CHIP_H)),
+    '旧布局两个元素确实重叠 (主人看到的现象)');
+
+  /* ✅ 新写法: 一个 flex 列, 子元素垂直排 + gap; 宽度卡在头像槽内 */
+  function newPlace(labels, an, av, im) {
+    const top = av && av.height > 0 ? Math.round(av.top - an.top + av.height + 4) : 2;
+    const how = av && av.height > 0 ? 'avatar' : 'top';
+    const avail = im && im.width >= 24 ? Math.round(im.left - an.left) - LEFT - 2 : null;
+    const maxW = avail !== null && avail >= 36 ? Math.min(avail, 120) : 56;
+    const kids = [];
+    let y = an.top + top;
+    for (const t of labels) {
+      const w = Math.min(t.length * 10 + 10, maxW);   // chip 宽估值, 封顶到槽宽
+      kids.push(rect(an.left + LEFT, y, w, CHIP_H));
+      y += CHIP_H + GAP;                              // gap 交给浏览器, 这里只是模拟
+    }
+    const barH = kids.length * CHIP_H + GAP * (kids.length - 1);
+    const barW = Math.max(...kids.map((k) => k.width));
+    return { kids: kids, how: how, top: top, maxW: maxW,
+             bar: rect(an.left + LEFT, an.top + top, barW, barH) };
+  }
+  const now = newPlace(['已解析', '下载'], anchor, avatar, img);
+
+  assert.strictEqual(now.how, 'avatar', '有头像 → 排头像下方');
+  assert.strictEqual(now.top, 48, '头像 4+40+4 = 48, 与 Chrome 实测的 top 一致');
+  assert.strictEqual(now.kids[0].left, LEFT, '角标 x=16, 与 Chrome 实测一致');
+  assert.strictEqual(now.kids[1].top - now.kids[0].bottom, GAP, '两行之间正好是 gap');
+  assert.ok(!overlaps(now.kids[0], now.kids[1]), 'flex 列排后两个 chip 不重叠');
+
+  /* 【最关键的断言】整条必须完全在图外 —— 主人要的就是这个 */
+  assert.ok(now.bar.right <= img.left, '徽标条右边缘 ≤ 图左边缘 → 完全在图外');
+  assert.ok(!overlaps(now.bar, img), '徽标条与图片无任何交集');
+  assert.strictEqual(now.maxW, 54, '槽宽 = 72−16−2 = 54px');
+
+  /* 多张图时文案变长 (「已解析 8」「下载 8」) → 仍不得盖到图 */
+  const multi = newPlace(['已解析 8', '下载 8'], anchor, avatar, img);
+  assert.ok(multi.bar.right <= img.left, '多张时文案变长, 被槽宽卡住, 仍在图外');
+  assert.ok(!overlaps(multi.kids[0], multi.kids[1]), '多张时仍不重叠');
+  // 反面对照: 不卡槽宽的话「已解析 8」会盖到图上
+  const naiveW = '已解析 8'.length * 10 + 10;      // 60px > 槽宽 54px
+  assert.ok(LEFT + naiveW > img.left, '不卡槽宽的话确实会越过图左边缘 (所以必须卡)');
+
+  /* 合并组的后续消息没头像 → 贴顶, 但仍在图外、仍不重叠 */
+  const grouped = newPlace(['已解析', '下载'], anchor, null, img);
+  assert.strictEqual(grouped.how, 'top', '没头像 → 贴顶');
+  assert.strictEqual(grouped.top, 2, '贴顶坐标 top=2');
+  assert.ok(grouped.bar.right <= img.left, '合并组也在图外');
+  assert.ok(!overlaps(grouped.kids[0], grouped.kids[1]), '合并组也不重叠');
+
+  /* 图还没布局出来 (惰加载, rect 为 0) → 回落默认槽宽, 不报错 */
+  const lazy = newPlace(['已解析', '下载'], anchor, avatar, rect(0, 0, 0, 0));
+  assert.strictEqual(lazy.maxW, 56, '图未布局 → 用默认 56px 槽宽');
+  assert.ok(!overlaps(lazy.kids[0], lazy.kids[1]), '回落时也不重叠');
+
+  /* 下载按钮的取锚: 包进 bar 后 parentElement 是 bar 而不是消息
+   * → 必须 closest('[data-moe-tagged="1"]'), 否则下载弹窗拿不到图 */
+  const msgNode = { tagged: true, parent: null };
+  const barNode = { tagged: false, parent: msgNode };
+  const dlNode = { tagged: false, parent: barNode };
+  const closestTagged = (n) => { for (let k = n; k; k = k.parent) if (k.tagged) return k; return null; };
+  assert.strictEqual(dlNode.parent, barNode, '旧写法 parentElement 只能拿到 bar (不是消息)');
+  assert.strictEqual(closestTagged(dlNode), msgNode, 'closest 能正确向上找到消息容器');
+});
+
+/* ---------- 表情锁定判定: 不能被自己的解锁动作擦掉 ----------
+ * 【现象】所有「解锁了的」表情插不出链接, 对方只看到 :name: 字面文本。
+ * 【真因】unlockEmoji() 每 1.2s + 每次 DOM 变动都 removeAttribute('aria-disabled'),
+ *   而 aria-disabled 正是 emojiLocked() 最主要的锁信号 → 自己把证据擦了。
+ *   实页诊断: 点本服动图表情 (需 Nitro, 必然是锁的) →
+ *     ariaDisabled=null, hasLockIcon=false, insertStamp=null (我们根本没跑),
+ *     输入框只多 12 字符 (CDN 链接 60+) → 那是 Discord 自己插的。
+ * 【修法】固化在前、擦除在后: 先把锁信号连表情 id 写进 data-moe-lock 再摘。
+ *   存 id 而不存布尔: 面板是虚拟滚动, React 会把 button 节点复用给别的表情。
+ */
+test('表情锁定判定: 解锁动作不得抹掉锁信号 (否则插不出链接)', () => {
+  /* 极简元素模型: 只实现 get/set/removeAttribute + dataset.id */
+  function btn(id, opts) {
+    const attrs = Object.assign({}, opts || {});
+    return {
+      dataset: { id: id },
+      getAttribute: function (k) { return k in attrs ? attrs[k] : null; },
+      setAttribute: function (k, v) { attrs[k] = String(v); },
+      removeAttribute: function (k) { delete attrs[k]; },
+      querySelector: function () { return null; },      // 无 emojiLockIcon (实测就是没有)
+      closest: function () { return null; },            // 不在 NitroLocked 分区
+      _attrs: attrs,
+    };
+  }
+  // Discord 自己的实时信号 (三条里只有 aria-disabled 在本例生效)
+  const lockedLive = (h) => h.getAttribute('aria-disabled') === 'true' ||
+                            !!h.querySelector('[class*="emojiLockIcon"]') ||
+                            !!h.closest('[class*="NitroLocked"]');
+
+  /* ❌ 旧流程: 只看实时信号, 且解锁先跑 */
+  const a = btn('111', { 'aria-disabled': 'true' });
+  assert.strictEqual(lockedLive(a), true, '面板刚渲染时确实是锁的');
+  a.removeAttribute('aria-disabled');                  // ← unlockEmoji 干的
+  assert.strictEqual(lockedLive(a), false, '旧流程: 解锁后锁信号消失 → 不接管 (这就是 bug)');
+
+  /* ✅ 新流程: 先 mark 再摘; 判定优先读标记 */
+  function mark(h) {
+    const sig = (h.dataset && h.dataset.id) || '1';
+    if (lockedLive(h)) { h.setAttribute('data-moe-lock', sig); return; }
+    const had = h.getAttribute('data-moe-lock');
+    if (had === null) return;
+    if (had !== sig) h.removeAttribute('data-moe-lock');   // 节点被复用给别的表情
+  }
+  function locked(h) {
+    const m = h.getAttribute('data-moe-lock');
+    if (m !== null && m === ((h.dataset && h.dataset.id) || '1')) return true;
+    return lockedLive(h);
+  }
+  const b = btn('222', { 'aria-disabled': 'true' });
+  mark(b);                                             // 先固化
+  b.removeAttribute('aria-disabled');                  // 再摘 (去灵用滤镜/恢复可点)
+  assert.strictEqual(locked(b), true, '新流程: 摘了 aria-disabled 仍能判定为锁 → 接管插链接');
+  assert.strictEqual(b.getAttribute('data-moe-lock'), '222', '标记存的是表情 id');
+
+  // 本服静态表情 (本来就能发) → 不能被误判成锁, 否则本可原生发却换成了链接
+  const c = btn('333', {});
+  mark(c);
+  assert.strictEqual(locked(c), false, '未锁表情不打标记 → 交回 Discord 原生');
+  assert.strictEqual(c.getAttribute('data-moe-lock'), null, '未锁就不应该有标记');
+
+  /* 虚拟滚动: 同一个 button 节点被 React 复用给另一个表情
+   * → 旧标记必须失效, 否则没锁的表情也被换成链接 (反向的 bug) */
+  const d = btn('444', { 'aria-disabled': 'true' });
+  mark(d);
+  d.removeAttribute('aria-disabled');
+  assert.strictEqual(locked(d), true, '复用前: 锁的');
+  d.dataset.id = '555';                                // ← 节点被复用给本服可用表情
+  assert.strictEqual(locked(d), false, '复用后: id 变了 → 旧标记不算, 不误接管');
+  mark(d);                                             // 下一轮清理
+  assert.strictEqual(d.getAttribute('data-moe-lock'), null, '下一轮把陈旧标记清掉');
+
+  /* 存布尔而不存 id 的反面对照: 滚一下就会把未锁表情误当成锁的 */
+  const e = btn('666', { 'aria-disabled': 'true' });
+  e.setAttribute('data-moe-lock', '1');                // 旧想法: 只存 '1'
+  e.dataset.id = '777';                                // 节点复用给未锁表情
+  const naive = (h) => h.getAttribute('data-moe-lock') !== null || lockedLive(h);
+  assert.strictEqual(naive(e), true, '只存布尔 → 复用后误判为锁 (所以必须存 id)');
+});
+

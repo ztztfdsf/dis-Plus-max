@@ -2,12 +2,28 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 
+/* 【版本号只能从 manifest 读】popup.html 里之前写死的是 3.6.3,
+ * manifest 已经到 3.6.7 —— 主人看的弹窗一直在报旧版号,
+ * 而这里恰好是「到底装的是哪个版本」最需要可信的位置。
+ * 同理 background.js 的 dbg.version 、content.js 的 DIAG_VER
+ * (后者跟着构建走, 由 build.js 与 manifest 一起校对)。 */
+function showVer() {
+  try {
+    const v = chrome.runtime.getManifest().version;
+    const el = $('ver');
+    if (el) el.textContent = v;
+  } catch (e) {}
+}
+showVer();
+
 function load() {
   chrome.storage.sync.get(null, (v) => {
     $('t-enabled').checked = v.enabled !== false;
     $('t-autoDecode').checked = v.autoDecode !== false;
     $('t-badge').checked = v.badge !== false;
-    $('t-nsfwOnly').checked = v.nsfwOnly === true;
+    /* 【默认开】与其他开关一致用 !== false 而不是 === true:
+     * === true 的语义是“没存过就算关”, 新装的人看到的就是未勾选。 */
+    $('t-nsfwOnly').checked = v.nsfwOnly !== false;
   });
 }
 
@@ -89,11 +105,17 @@ function loadDiag() {
         }
         const states = Object.entries(d.scanStates || {}).map(([k, v]) => k + '=' + v).join(' ') || '无';
         el.textContent = [
-          '页面脚本 v' + (d.ver || '?') + ' · 角标 ' + d.badges,
+          // 【字段名要对齐】content.js 回的是 tags, 老版这里读 d.badges → 永远显示 undefined
+          '页面脚本 v' + (d.ver || '?') + ' · 角标 ' + (d.tags != null ? d.tags : '?'),
           '扫描: ' + (d.scan || '-'),
           '图片状态: ' + states,
           '配置: ' + (d.cfg || '-'),
+          'PNG 编码: ' + (d.png || '-'),
+          d.badge ? '角标定位: ' + d.badge : '',
+          d.hijack ? '表情接管: ' + d.hijack : '',
+          d.insert ? '输入插入: ' + d.insert : '',
           '最近结果: ' + (d.last || '-'),
+          d.fastpng ? 'PNG 回落: ' + d.fastpng : '',
           d.err ? '异常: ' + d.err : '',
         ].filter(Boolean).join('\n');
         el.style.display = 'block';

@@ -28,6 +28,11 @@
   const FMT = window._moeFormat;
   if (!Core || !FMT) return;
 
+  /* 【初值故意保守】这里是主世界, 真配置要等 content.js 通过 postMessage 送过来。
+   * 在那之前如果先写成 nsfwOnly:true, 万一有图在这个窗口期上传,
+   * 就会走“只混淆高分图”→ 启发式漏判就把原图直发出去了。
+   * false = 全部混淆, 是安全的那一侧 —— 不是默认值, 只是未同步前的兵库。
+   * (真正的默认值在 content.js / options.js 的 DEFAULTS 里, 已改成 true) */
   const cfg = {
     enabled: true, tile: 0, salt: '', maxDim: 0, skipAnimated: true,
     nsfwOnly: false, nsfwThreshold: 0.7, reviewMode: 'local', reviewTimeoutMs: 6000,
@@ -232,7 +237,11 @@
 
     item.state = 'sent';
     rec({ ev: 'release', id: item.id, trigger, as: label, why, bytes: body ? body.byteLength : item.u8.length });
-    log({ ev: 'upload-replaced', info: label + ' · ' + ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB' });
+    /* 【obf 必须带上】不然隔离世界不知道这笔到底换没换,
+     * 会把原图直通也报成「已混淆上传 · 原图」(主人抓到的矛盾文案)。 */
+    log({ ev: 'upload-replaced', obf: !!body, as: label,
+          kb: ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB',
+          info: label + ' · ' + ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB' });
     try {
       origSend.call(item.xhr, body || item.sendBody);
     } catch (e) {
@@ -496,7 +505,9 @@
         const h = new Headers(headers || {});
         h.delete('content-length');
         h.set('content-type', 'image/png');
-        log({ ev: 'upload-replaced', info: u8.length + 'B(' + mime + ') → ' + blob.size + 'B(png) [fetch]' });
+        log({ ev: 'upload-replaced', obf: true, as: '混淆图',
+              kb: (blob.size / 1024).toFixed(0) + 'KB',
+              info: u8.length + 'B(' + mime + ') → ' + blob.size + 'B(png) [fetch]' });
         return nativeFetch(url, { method: 'PUT', headers: h, body: blob });
       } catch (e) {
         log({ ev: 'error', msg: 'fetch: ' + (e && e.message ? e.message : e) });

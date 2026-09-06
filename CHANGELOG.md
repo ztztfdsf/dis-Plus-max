@@ -6,6 +6,33 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.6.9 — 2026-09-06
+
+### 🦊 Firefox（根因修复：解码「突然」完全不动）
+
+实页症状：所有附件图永久 `pending`，扫描 `new=0`，`最近结果: fetch-fail:prefilter`，
+弹窗还报喜「已扫描，可解码的喵图已还原 ✓」。
+
+**根因 A：消息通道可能永远不回包。** Firefox 的 event page 在 fetch 途中被挂起/终止时，
+`sendMessage` 的回调既不调也不报错。`fetchImg` 没有超时 → `decodeUrl` 的 Promise 永远挂着，
+还进了 `cache` → 这张图永久 pending，之后每轮扫描都跳过它。一次卡死，终身不解。
+修法：`fetchImg` 自带 12s 超时；后台侧 fetch 也加 20s `AbortController`，不让悬挂的请求
+拖死 event page。
+
+**根因 B：真实错误被吞成 `prefilter`。** 预筛把 HTTP 错误 / 网络错误 / 无回包全吞成
+`'retry'`，面板上完全看不到根因。现在底层错误原样带进 `最近结果`
+（如 `fetch-fail:prefilter:bg:HTTP 403 | direct:…`），并新增 `预筛错误` 诊断字段。
+
+**兜底：后台代抓失败 → 内容脚本直接 fetch。** Firefox 的内容脚本带 host 权限可绕 CORS；
+Chrome 上直接抓会被页面 CSP 拦，那时把两条路的错误都报出来。
+
+### 🌐 三端共通
+
+弹窗「扫描全部」按钮不再说谎：以前是点了就报「已还原 ✓」（扫描只是触发，解码是异步的），
+现在等一拍读真实状态再报「已解码 X · 排队 Y · 失败 Z」。
+
+---
+
 ## v3.6.8 — 2026-09-06
 
 ### ⚠️ 行为变更（三端一致）

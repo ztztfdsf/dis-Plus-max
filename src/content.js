@@ -82,30 +82,50 @@
     return new Promise((res) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.readAsDataURL(blob); });
   }
 
-  /* ---------- 抓图 (后台代抓, 绕 CORS; 支持 Range 只取头部) ---------- */
+  /* ---------- 抓图 (后台代抓, 绕 CORS; 支持 Range 只取头部) ----------
+   * 【必须自带超时】Firefox 的 event page 在 fetch 途中被挂起/终止时,
+   *   sendMessage 的回调可能永远不来 (消息通道随后台页一起死, 不回调也不报错)。
+   *   没有超时 → decodeUrl 的 Promise 永远挂着, 还进了 cache → 这张图永久
+   *   pending, 之后每轮扫描都跳过 (new=0), 看上去就是「突然不解码了」。
+   * 【后台失败 → 直接 fetch 兜底】Firefox 的内容脚本带 host 权限时可绕 CORS
+   *   直接跨域抓; Chrome 会被页面 CSP 拦, 那时回报两条路的错误便于诊断。 */
+  function fetchDirect(url, range) {
+    const opt = { credentials: 'include', cache: 'no-store' };
+    if (range) opt.headers = { Range: 'bytes=' + range };
+    return fetch(url, opt)
+      .then(async (r) => {
+        if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
+        /* 拷成本 realm 再切: 隔离世界里 r.arrayBuffer() 的 buffer 属于页面 realm,
+         * 对它的视图调 subarray 会报 Permission denied to access property "constructor"。 */
+        const raw = new Uint8Array(await r.arrayBuffer());
+        const buf = new Uint8Array(raw.length);
+        buf.set(raw);
+        let bin = '';
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+        return { ok: true, base64: btoa(bin), mime: r.headers.get('content-type') || 'image/png' };
+      })
+      .catch((e) => ({ ok: false, error: String(e) }));
+  }
   function fetchImg(url, range) {
     return new Promise((res) => {
+      let done = false;
+      const finish = (r) => { if (!done) { done = true; clearTimeout(timer); res(r); } };
+      const timer = setTimeout(() => finish({ ok: false, error: 'timeout:12s' }), 12000);
       if (EXT) {
+        let sent = false;
         try {
-          chrome.runtime.sendMessage({ action: 'fetchImg', url, range }, (r) => res(r || { ok: false, error: 'no-reply' }));
-          return;
+          chrome.runtime.sendMessage({ action: 'fetchImg', url, range }, (r) => {
+            const le = chrome.runtime.lastError;   // 必须先读, 否则控制台刷警告
+            if (r && r.ok) { finish(r); return; }
+            const bgErr = (r && r.error) || (le && le.message) || 'no-reply';
+            fetchDirect(url, range).then((d) =>
+              finish(d.ok ? d : { ok: false, error: ('bg:' + bgErr + ' | direct:' + (d.error || '?')).slice(0, 160) }));
+          });
+          sent = true;
         } catch (e) {}
+        if (sent) return;
       }
-      const opt = { credentials: 'include', cache: 'no-store' };
-      if (range) opt.headers = { Range: 'bytes=' + range };
-      fetch(url, opt)
-        .then(async (r) => {
-          if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
-          /* 拷成本 realm 再切: 隔离世界里 r.arrayBuffer() 的 buffer 属于页面 realm,
-           * 对它的视图调 subarray 会报 Permission denied to access property "constructor"。 */
-          const raw = new Uint8Array(await r.arrayBuffer());
-          const buf = new Uint8Array(raw.length);
-          buf.set(raw);
-          let bin = '';
-          for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
-          res({ ok: true, base64: btoa(bin), mime: r.headers.get('content-type') || 'image/png' });
-        })
-        .catch((e) => res({ ok: false, error: String(e) }));
+      fetchDirect(url, range).then(finish);
     });
   }
   function tele(data) { if (EXT) { try { chrome.runtime.sendMessage({ action: 'moe-telemetry', data }); } catch (e) {} } }
@@ -160,11 +180,16 @@
    * 尺寸整除作为辅助兜底 (兼容旧版无标记块的图)。
    * -------------------------------------------------- */
   const prefilterCache = new Map(); // url → Promise<'moe'|'legacy'|'no'|'retry'>
+  let prefilterErr = '';            // 最近一次预筛失败的真实原因 (进诊断面板, 不能再吞)
   function prefilter(url) {
     if (prefilterCache.has(url)) return prefilterCache.get(url);
     const p = (async () => {
       const fr = await fetchImg(url, '0-127');
-      if (!fr.ok || !fr.base64) return 'retry';        // 抓不到字节 ≠ 不是喵图
+      if (!fr.ok || !fr.base64) {            // 抓不到字节 ≠ 不是喵图
+        prefilterErr = (fr && fr.error) || 'no-bytes';
+        stamp('pre', prefilterErr);
+        return 'retry';
+      }
       const bin = atob(fr.base64);
       const b = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) b[i] = bin.charCodeAt(i);
@@ -184,7 +209,11 @@
         }
       }
       return 'no';
-    })().catch(() => 'retry');
+    })().catch((e) => {
+      prefilterErr = 'throw:' + String((e && e.message) || e).slice(0, 80);
+      stamp('pre', prefilterErr);
+      return 'retry';
+    });
     prefilterCache.set(url, p);
     p.then((v) => { if (v === 'retry') prefilterCache.delete(url); }).catch(() => prefilterCache.delete(url));
     return p;
@@ -212,7 +241,7 @@
       if (!skipPrefilter) {
         const pre = await prefilter(origUrl);
         if (pre === 'no') return { status: 'not-moe' };
-        if (pre === 'retry') return { status: 'fetch-fail', error: 'prefilter' };
+        if (pre === 'retry') return { status: 'fetch-fail', error: 'prefilter:' + (prefilterErr || '?') };
       }
       const fr = await fetchImg(origUrl);
       if (!fr.ok) return { status: 'fetch-fail', error: fr.error };
@@ -400,7 +429,7 @@
       pend++;
       decodeUrl(orig).then((r) => {
         try {
-          stamp('last', r.status + (r.error ? ':' + String(r.error).slice(0, 40) : ''));
+          stamp('last', r.status + (r.error ? ':' + String(r.error).slice(0, 90) : ''));
           if (r.status === 'decoded' && r.blob) {
             applyDecoded(img, raw, r);
           } else if (r.status === 'resized') {

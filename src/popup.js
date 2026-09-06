@@ -57,7 +57,24 @@ $('scan').addEventListener('click', () => {
         if (chrome.runtime.lastError) {
           $('st').textContent = '当前页面不是 Discord 或扩展尚未加载';
         } else {
-          $('st').textContent = '已扫描，可解码的喵图已还原 ✓';
+          /* 【文案要说实话】扫描只是触发, 解码是异步的 —— 以前一点就报
+           * 「已还原 ✓」, 实际可能全卡在抓取上, 这句话把主人误导过。
+           * 等一拍读真实状态再报。 */
+          $('st').textContent = '已触发重扫…';
+          setTimeout(() => {
+            try {
+              chrome.tabs.sendMessage(tab.id, { action: 'moe-diag' }, (d) => {
+                if (chrome.runtime.lastError || !d) return;
+                const s = d.scanStates || {};
+                const pend = s.pending || 0;
+                const fail = Object.entries(s).filter(([k]) => /fail|error|resized|bad-salt/.test(k))
+                  .reduce((a, kv) => a + kv[1], 0);
+                $('st').textContent = '重扫: 已解码 ' + (s.decoded || 0)
+                  + ' · 排队 ' + pend + (fail ? ' · 失败 ' + fail : '')
+                  + (d.last ? ' · ' + d.last : '');
+              });
+            } catch (e) {}
+          }, 2500);
         }
       });
     } catch (e) {
@@ -116,6 +133,7 @@ function loadDiag() {
           d.insert ? '输入插入: ' + d.insert : '',
           '最近结果: ' + (d.last || '-'),
           d.fastpng ? 'PNG 回落: ' + d.fastpng : '',
+          d.pre ? '预筛错误: ' + d.pre : '',
           d.err ? '异常: ' + d.err : '',
         ].filter(Boolean).join('\n');
         el.style.display = 'block';

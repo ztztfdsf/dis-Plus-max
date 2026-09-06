@@ -181,13 +181,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'fetchImg' && msg.url) {
     const init = { credentials: 'include', cache: 'no-store' };
     if (msg.range) init.headers = { Range: 'bytes=' + msg.range };
+    /* 【后台也要自带超时】event page 里悬挂的 fetch 会拖着消息通道一起死:
+     * 内容脚本永远等不到回包 → 图片永久 pending (v3.6.9 修的根因之一)。 */
+    const ctl = new AbortController();
+    const to = setTimeout(() => ctl.abort(), 20000);
+    init.signal = ctl.signal;
     fetch(msg.url, init)
       .then(async (r) => {
         if (!r.ok && r.status !== 206) throw new Error('HTTP ' + r.status);
         const buf = new Uint8Array(await r.arrayBuffer());
         sendResponse({ ok: true, base64: u8ToB64(buf), mime: r.headers.get('content-type') || 'application/octet-stream' });
       })
-      .catch((e) => sendResponse({ ok: false, error: String(e) }));
+      .catch((e) => sendResponse({ ok: false, error: String(e) }))
+      .finally(() => clearTimeout(to));
     return true;
   }
 

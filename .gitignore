@@ -21,3 +21,6 @@ desktop.ini
 *.tmp
 _*.js
 _*.json
+
+# 会话粘贴板
+.pideck-paste/

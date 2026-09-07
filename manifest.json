@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "MoeGuard 喵图混淆",
-  "version": "3.6.9",
+  "version": "3.7.0",
   "description": "Discord 图片上传自动混淆（流光照影）：只有装了本插件的人才能看到原图。轻量、无损、无需密钥，可选只混淆色情图片。",
   "permissions": ["storage", "contextMenus", "downloads"],
   "optional_host_permissions": ["https://*/*"],

@@ -407,11 +407,59 @@
     applyDecoded(img, raw, hit);
     return true;
   }
+  /* ---------- 视窗优先的解码队列 ----------
+   * 【高楼层卡死的根因】滚到楼上时一屏涌入几十张历史图, 旧版对【所有】附件图
+   *   同时发起预筛+全图抓取, 没有并发上限 → 代理/连接池瞬间被挤满,
+   *   每笔都爬到超时 → 看上去就是「高楼层之后不解码了」。
+   * 修法:
+   *   1. 离视窗超过两屏的图【不抓】(滚近了下一轮扫描自然轮到, 不浪费带宽)
+   *   2. 剩下的按【到视窗的距离】排序 → 视窗里的永远先解
+   *   3. 全局并发上限 MAX_INFLIGHT, 超出的留到下一轮 (扫描每 1.2s 就跑)
+   * 视窗判定用 getBoundingClientRect + innerHeight: 扫描本来就周期性跑,
+   *   不需要再养一个 IntersectionObserver。 */
+  const MAX_INFLIGHT = 4;
+  let inflight = 0;
+  function queueDecode(img, raw) {
+    const orig = DEV_ANY_IMAGE && !isAttachment(raw) ? raw : toOriginalUrl(raw);
+    img.dataset.moeScan = 'pending';
+    img.dataset.moeScanSrc = raw;
+    inflight++;
+    decodeUrl(orig).then((r) => {
+      inflight--;
+      try {
+        stamp('last', r.status + (r.error ? ':' + String(r.error).slice(0, 90) : ''));
+        if (r.status === 'decoded' && r.blob) {
+          applyDecoded(img, raw, r);
+        } else if (r.status === 'resized') {
+          img.dataset.moeScan = 'resized';
+          tagAvatar(img, 'resized', false);
+        } else if (r.status === 'bad-salt') {
+          img.dataset.moeScan = 'bad-salt';
+          tagAvatar(img, 'bad-salt', false);
+        } else if (r.status === 'fetch-fail') {
+          // 瞬时失败: 清掉标记 → 下一轮重试 (不能一次失败就永不再试)
+          delete img.dataset.moeScan;
+          delete img.dataset.moeScanSrc;
+        } else {
+          img.dataset.moeScan = r.status || 'no';
+          // 普通图: 在大图弹窗里就拉原图 (长图不再被降采样糊掉)
+          if (img.closest('[class*="carouselModal"], [class*="imageDetails"]')) upgradeFullRes(img);
+        }
+      } catch (e) { stamp('err', 'apply:' + e.message); }
+    }).catch((e) => {
+      inflight--;
+      delete img.dataset.moeScan;
+      delete img.dataset.moeScanSrc;
+      stamp('err', 'dec:' + (e && e.message));
+    });
+  }
   function scanImages() {
     if (!cfg.autoDecode) { stamp('scan', 'off'); return; }
     let imgs;
     try { imgs = document.querySelectorAll(MSG_IMG_SEL); } catch (e) { stamp('err', 'sel:' + e.message); return; }
-    let pend = 0, skip = 0;
+    let pend = 0, skip = 0, far = 0;
+    const vh = window.innerHeight || 800;
+    const cand = [];
     for (const img of imgs) {
       const raw = img.currentSrc || img.src || '';
       // src 变了就重新审视 (Discord 会复用 img 元素: 惰加载占位图→真图、切频道复用)
@@ -423,38 +471,23 @@
       }
       // 这张图之前已经解过 (列表里的缩图) → 同步置换, 不给混淆图任何亮相机会
       if (swapIfKnown(img)) continue;
-      const orig = DEV_ANY_IMAGE && !isAttachment(raw) ? raw : toOriginalUrl(raw);
-      img.dataset.moeScan = 'pending';
-      img.dataset.moeScanSrc = raw;
-      pend++;
-      decodeUrl(orig).then((r) => {
-        try {
-          stamp('last', r.status + (r.error ? ':' + String(r.error).slice(0, 90) : ''));
-          if (r.status === 'decoded' && r.blob) {
-            applyDecoded(img, raw, r);
-          } else if (r.status === 'resized') {
-            img.dataset.moeScan = 'resized';
-            tagAvatar(img, 'resized', false);
-          } else if (r.status === 'bad-salt') {
-            img.dataset.moeScan = 'bad-salt';
-            tagAvatar(img, 'bad-salt', false);
-          } else if (r.status === 'fetch-fail') {
-            // 瞬时失败: 清掉标记 → 下一轮重试 (不能一次失败就永不再试)
-            delete img.dataset.moeScan;
-            delete img.dataset.moeScanSrc;
-          } else {
-            img.dataset.moeScan = r.status || 'no';
-            // 普通图: 在大图弹窗里就拉原图 (长图不再被降采样糊掉)
-            if (img.closest('[class*="carouselModal"], [class*="imageDetails"]')) upgradeFullRes(img);
-          }
-        } catch (e) { stamp('err', 'apply:' + e.message); }
-      }).catch((e) => {
-        delete img.dataset.moeScan;
-        delete img.dataset.moeScanSrc;
-        stamp('err', 'dec:' + (e && e.message));
-      });
+      // 到视窗的距离 (0 = 在视窗内); 大图弹窗模态恒在视窗内
+      let dist = 0;
+      try {
+        const r = img.getBoundingClientRect();
+        dist = r.bottom < 0 ? -r.bottom : (r.top > vh ? r.top - vh : 0);
+      } catch (e) {}
+      if (dist > vh * 2) { far++; continue; }        // 两屏以外不抓, 滚近了再说
+      cand.push({ img, raw, dist });
     }
-    stamp('scan', 'imgs=' + imgs.length + ' new=' + pend + ' skip=' + skip);
+    // 视窗优先: 离视窗越近越先解; 并发挤满就留到下一轮
+    cand.sort((a, b) => a.dist - b.dist);
+    for (const c of cand) {
+      if (inflight >= MAX_INFLIGHT) break;
+      pend++;
+      queueDecode(c.img, c.raw);
+    }
+    stamp('scan', 'imgs=' + imgs.length + ' new=' + pend + ' skip=' + skip + ' far=' + far + ' q=' + inflight);
   }
 
   /* ---------- 输入框预览: 【先审查 → 再决定混不混】----------
@@ -1604,6 +1637,19 @@
    *   3. beforeinput + data (insertText)
    *   4. execCommand (只改 DOM, 兵库)
    * 四条在 Firefox 152 探针里都验证过能写进 model。 */
+  /* 【编辑消息时表情插错框的修复】点击表情面板按钮会把焦点从输入框抢走,
+   *   activeElement 不再是任何 textbox → 旧写法按 DOM 顺序挑第一个可见输入框,
+   *   永远挑中主输入栏 → 编辑消息时点的表情插进了主输入栏。
+   *   记下【最近聚焦过的】输入框: 编辑模式下用户最后碰的就是编辑框 (Discord
+   *   进编辑模式会自动聚焦它), 主栏同理。 */
+  let lastFocusedBox = null;
+  try {
+    document.addEventListener('focusin', (e) => {
+      const t = e.target;
+      if (t && t.getAttribute && t.getAttribute('contenteditable') === 'true' &&
+          t.getAttribute('role') === 'textbox') lastFocusedBox = t;
+    }, true);
+  } catch (e) {}
   function composerEl() {
     /* 优先拿正在输入的那个: 回复模式/子区会同时存在多个 textbox,
      * 拿错了就把链接插到不可见的那个里 —— 看着就是“没反应”。
@@ -1611,12 +1657,25 @@
     const act = document.activeElement;
     if (act && act.getAttribute && act.getAttribute('contenteditable') === 'true' &&
         act.getAttribute('role') === 'textbox') return act;
+    // 焦点被表情面板抢走时: 用最近聚焦过的输入框 (编辑框优先场景)
+    if (lastFocusedBox && lastFocusedBox.isConnected) {
+      try {
+        const lr = lastFocusedBox.getBoundingClientRect();
+        if (lr.width > 0 && lr.height > 0) return lastFocusedBox;
+      } catch (e) {}
+    }
     const list = document.querySelectorAll('[contenteditable="true"][role="textbox"], [class*="slateTextArea"][contenteditable="true"], textarea[role="textbox"]');
+    const vis = [];
     for (const el of list) {
       const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) return el;
+      if (r.width > 0 && r.height > 0) vis.push(el);
     }
-    return list[0] || null;
+    /* 编辑框不在 channelTextArea 里: 多个可见输入框且没有聚焦记录时,
+     * 优先非主栏的那个 (编辑框), 主栏永远最后兑底。 */
+    for (const el of vis) {
+      if (!el.closest('[class*="channelTextArea"]')) return el;
+    }
+    return vis[0] || list[0] || null;
   }
 
   /* 页面 realm 句柄: Firefox 隔离世界才有; Chrome / 主世界为 null */

@@ -6,6 +6,22 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.7.1 — 2026-09-06
+
+### 🤖 GeckoView 适配（安卓端起步）
+
+给 GeckoView 套壳 App 铺路，三处兼容修补（桌面端行为零变化）：
+
+- **后台脚本判空 `chrome.contextMenus` / `chrome.downloads`**：GeckoView 里这两个
+  API 是 undefined，不判空后台脚本加载即崩 → 消息全灭、解码审查全瘫。
+- **下载走原生桥**：没有 `downloads` API 时改用 `sendNativeMessage('app', …)`，
+  由安卓 App 的 `MessageDelegate` 把 dataURL 写进系统下载目录
+  （manifest 新增 `nativeMessaging` 权限）。
+- **触屏长按解码**：手机上没有右键菜单 —— 长按附件图 550ms 直接弹解码窗，
+  并吞掉随后的 contextmenu 避免系统菜单抢戏。桌面无 touch 事件，天然不生效。
+
+---
+
 ## v3.7.0 — 2026-09-06
 
 ### 🚀 视窗优先的解码队列（高楼层不解码的根因修复）

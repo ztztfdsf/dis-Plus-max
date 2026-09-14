@@ -2004,11 +2004,39 @@
       window.addEventListener('resize', () => { try { retagAll(); } catch (e) {} }, { passive: true });
     } catch (e) {}
   }
+  /* ---------- 触屏长按解码 (安卓/GeckoView 没有右键菜单) ----------
+   * 长按附件图 550ms → 直接弹解码窗 (与右键菜单同一条 decodeUrlModal 路)。
+   * 桌面上没有 touch 事件, 这段天然不生效; 触屏笔记本上算多个入口, 无害。 */
+  function watchLongPress() {
+    let lp = null;
+    const cancel = () => { if (lp && !lp.fired) { clearTimeout(lp.t); lp = null; } };
+    try {
+      document.addEventListener('touchstart', (e) => {
+        try {
+          const img = e.target && e.target.closest ? e.target.closest('img[src]') : null;
+          if (!img) { lp = null; return; }
+          const raw = img.currentSrc || img.src || '';
+          if (!raw || !isAttachment(raw)) { lp = null; return; }
+          cancel();
+          lp = { fired: false, t: setTimeout(() => { lp.fired = true; decodeUrlModal(raw); }, 550) };
+        } catch (err) {}
+      }, { passive: true, capture: true });
+      document.addEventListener('touchmove', cancel, { passive: true, capture: true });
+      document.addEventListener('touchend', cancel, { passive: true, capture: true });
+      document.addEventListener('touchcancel', cancel, { passive: true, capture: true });
+      /* 长按已触发解码窗 → 吞掉随后的 contextmenu, 免得安卓再弹系统长按菜单 */
+      document.addEventListener('contextmenu', (e) => {
+        if (lp && lp.fired) { e.preventDefault(); e.stopPropagation(); lp = null; }
+      }, true);
+    } catch (e) {}
+  }
+
   syncCfg().then(() => {
     fetchMyId();
     watchReports();
     watchEmoji();
     watchImages();
+    watchLongPress();
     loop();
-  }).catch((e) => { stamp('err', 'boot:' + e.message); watchImages(); loop(); });
+  }).catch((e) => { stamp('err', 'boot:' + e.message); watchImages(); watchLongPress(); loop(); });
 })();

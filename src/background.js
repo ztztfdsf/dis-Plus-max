@@ -27,20 +27,27 @@ const dbg = {
 };
 function dbgSave() { try { chrome.storage.session.set({ moeDbg: dbg }); } catch (e) {} }
 
-chrome.runtime.onInstalled.addListener(() => {
-  try { chrome.contextMenus.removeAll(() => createMenus()); } catch (e) { createMenus(); }
-});
+/* 【GeckoView 没有 contextMenus】安卓套壳里这个 API 是 undefined,
+ * 不判空的话整个后台脚本在加载时就崩 → 消息全灭, 解码/审查全瘫。 */
+const HAS_MENUS = (() => { try { return !!(chrome.contextMenus && chrome.contextMenus.create); } catch (e) { return false; } })();
+if (HAS_MENUS) {
+  chrome.runtime.onInstalled.addListener(() => {
+    try { chrome.contextMenus.removeAll(() => createMenus()); } catch (e) { createMenus(); }
+  });
+}
 function createMenus() {
   try {
     chrome.contextMenus.create({ id: CONTEXT_MENU_ID, title: '🔓 解码此图片（喵图混淆）', contexts: ['image'] });
   } catch (e) {}
 }
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (!info || info.menuItemId !== CONTEXT_MENU_ID) return;
-  if (tab && tab.id != null && info.srcUrl) {
-    try { chrome.tabs.sendMessage(tab.id, { action: 'decode-url', url: info.srcUrl }); } catch (e) {}
-  }
-});
+if (HAS_MENUS) {
+  chrome.contextMenus.onClicked.addListener((info, tab) => {
+    if (!info || info.menuItemId !== CONTEXT_MENU_ID) return;
+    if (tab && tab.id != null && info.srcUrl) {
+      try { chrome.tabs.sendMessage(tab.id, { action: 'decode-url', url: info.srcUrl }); } catch (e) {}
+    }
+  });
+}
 
 function u8ToB64(bytes) {
   let bin = '';
@@ -198,7 +205,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.action === 'download' && msg.url) {
-    chrome.downloads.download({ url: msg.url, filename: msg.filename || 'decoded.png', saveAs: false });
+    /* 【GeckoView 没有 downloads API】安卓套壳里走原生桥:
+     * sendNativeMessage('app') 由 GeckoView 路由给 App 里注册的 MessageDelegate,
+     * 由 App 把 dataURL 写进系统下载目录。桌面端不受到影响。 */
+    if (chrome.downloads && chrome.downloads.download) {
+      try { chrome.downloads.download({ url: msg.url, filename: msg.filename || 'decoded.png', saveAs: false }); } catch (e) {}
+    } else if (chrome.runtime.sendNativeMessage) {
+      try { chrome.runtime.sendNativeMessage('app', { download: msg.url, filename: msg.filename || 'decoded.png' }); } catch (e) {}
+    }
     sendResponse({ ok: true });
     return true;
   }

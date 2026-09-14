@@ -2004,6 +2004,34 @@
       window.addEventListener('resize', () => { try { retagAll(); } catch (e) {} }, { passive: true });
     } catch (e) {}
   }
+  /* ---------- 新 emoji 字体兜底 (安卓/GeckoView 专用) ----------
+   * 旧安卓的系统 emoji 字体缺 2021 年后的码点 (🪪🫠🧬…) → 显示成「口」。
+   * 打包 Twemoji Mozilla (Firefox 自带的 emoji 兜底字体) 进扩展,
+   * 重定义 Discord 的 :root 字体变量把 MoeEmoji prepend 进去;
+   * @font-face 用 unicode-range 限定 emoji 区段 → 普通文本零影响,
+   * 等宽代码块也不串 (变量层面注入, 不盖任何元素的 font-family)。
+   * 只在 GeckoView 上注入: 桌面系统 emoji 完整, 不抢原生观感。 */
+  function injectEmojiFont() {
+    try {
+      const url = chrome.runtime.getURL('fonts/TwemojiMozilla.ttf');
+      const st = document.createElement('style');
+      st.id = 'moe-emoji-font';
+      const tail = "'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif";
+      const mono = "'gg mono','Source Code Pro',Consolas,'Andale Mono',Menlo,monospace";
+      st.textContent =
+        "@font-face{font-family:'MoeEmoji';src:url('" + url + "');" +
+        'unicode-range:U+1F000-1FAFF,U+2600-27BF,U+2B00-2BFF,U+2190-21FF,U+2300-23FF,U+FE0F,U+200D;}' +
+        ':root{' +
+        "--font-primary:'MoeEmoji'," + tail + ' !important;' +
+        "--font-display:'MoeEmoji'," + tail + ' !important;' +
+        "--font-headline:'MoeEmoji'," + tail + ' !important;' +
+        "--font-monospace:'MoeEmoji'," + mono + ' !important;' +
+        "--font-code:'MoeEmoji'," + mono + ' !important;}';
+      (document.head || document.documentElement).appendChild(st);
+      stamp('emoji-font', 'injected');
+    } catch (e) { stamp('err', 'font:' + e.message); }
+  }
+
   /* ---------- 触屏长按解码 (安卓/GeckoView 没有右键菜单) ----------
    * 长按附件图 550ms → 直接弹解码窗 (与右键菜单同一条 decodeUrlModal 路)。
    * 桌面上没有 touch 事件, 这段天然不生效; 触屏笔记本上算多个入口, 无害。 */
@@ -2028,6 +2056,13 @@
       document.addEventListener('contextmenu', (e) => {
         if (lp && lp.fired) { e.preventDefault(); e.stopPropagation(); lp = null; }
       }, true);
+    } catch (e) {}
+  }
+
+  /* GeckoView (安卓壳) 才注入 emoji 兜底字体 —— 判定只能问后台 (内容脚本看不到 contextMenus) */
+  if (EXT) {
+    try {
+      chrome.runtime.sendMessage({ action: 'platform-probe' }, (r) => { if (r && r.geckoView) injectEmojiFont(); });
     } catch (e) {}
   }
 

@@ -217,6 +217,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  /* 平台探针: 没有 contextMenus 的只有 GeckoView 套壳 (安卓) —— 内容脚本
+   * 自己看不到 contextMenus (那是后台专用 API), 只能问后台。 */
+  if (msg.action === 'platform-probe') { sendResponse({ geckoView: !HAS_MENUS }); return false; }
+
   if (msg.action === 'moe-dbg') { sendResponse(JSON.parse(JSON.stringify(dbg))); return true; }
   return undefined;
 });

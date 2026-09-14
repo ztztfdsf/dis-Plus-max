@@ -36,7 +36,7 @@ const BASE = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'
 const VER = BASE.version;
 
 /* 打进包里的内容。dev/ 与 tests/ 不进包 —— 上架审核不需要, 也别让用户下载测试图 */
-const PAYLOAD = ['src', 'icons'];
+const PAYLOAD = ['src', 'icons', 'fonts'];
 const EXTRA = ['README.md', 'CHANGELOG.md', 'LICENSE'];
 
 /* ══════════════════ manifest 变换 ══════════════════ */

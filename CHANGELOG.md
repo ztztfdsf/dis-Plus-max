@@ -6,6 +6,21 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.7.2 — 2026-09-06
+
+### 🤖 新 emoji 不再显示「口」（安卓）
+
+旧安卓的系统 emoji 字体缺 2021 年后的码点（🪪🫠🧬…），Discord 里一片豆腐块。
+打包 **Twemoji Mozilla**（Firefox 自带的 emoji 兜底字体，1.4MB）进扩展，
+重定义 Discord 的 `:root` 字体变量把 `MoeEmoji` prepend 进字体栈：
+
+- `@font-face` 用 `unicode-range` 限定 emoji 区段 → 普通文本零影响
+- 变量层面注入，不盖任何元素的 `font-family` → 代码块等宽不串
+- 只在 GeckoView 注入（判定：后台 `platform-probe` 报没有 `contextMenus`），
+  桌面端保持系统原生 emoji 观感
+
+---
+
 ## v3.7.1 — 2026-09-06
 
 ### 🤖 GeckoView 适配（安卓端起步）

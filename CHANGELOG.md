@@ -6,6 +6,65 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.7.7 — 2026-09-14
+
+### 🤖 移除 GeckoView 粘贴中继（整条 native messaging 在 155 上是死的）
+
+实机日志：后台 `connectNative('app')` 反复炸 `Native manifests are not supported on
+android`（后台起跑早于 App 注册 MessageDelegate，且 GeckoView 155 的 native
+messaging 走 NativeManifests 直接抛错）。v3.7.5/v3.7.6 的中继 + 重试全部移除。
+
+安卓粘贴改由 **App 侧合成 Ctrl+V 键事件**完成（`SessionTextInput.onKeyDown/Up`）：
+Gecko 原生 paste 命令自己读安卓剪贴板，React 受控框 / Slate 编辑器通吃。
+曾尝试 `InputConnection.commitText`，实测为**假成功**（返回 true 但无 IME 会话时
+GeckoEditable 丢弃 IPC）——此路不通，勿再踩。
+
+桌面浏览器无任何变化。
+
+---
+
+## v3.7.6 — 2026-09-06
+
+### 🤖 粘贴中继加自动重连（后被 v3.7.7 移除）
+
+后台 `connectNative` 起跑早于 App 注册 delegate，加 2s × 30 次重试。
+实机验证 native messaging 在 GeckoView 155 整条不可用，本版方案作废。
+
+---
+
+## v3.7.5 — 2026-09-06
+
+### 🤖 修复安卓粘贴桥完全不通
+
+GeckoView 155 实测：内容脚本调 `connectNative` 直接报
+`Native messaging not allowed (envType=content_child)` —— 只能由后台起连接。
+改为：后台（仅 GeckoView）起 `connectNative('app')` 长连接，内容脚本用
+`runtime.connect('moe-ui')` 连后台，后台中继 App 推来的粘贴文本。
+
+---
+
+## v3.7.4 — 2026-09-06
+
+### 🤖 原生桥粘贴支持普通输入框（登录页能粘账号密码了）
+
+v3.7.3 的桥只认 Slate 输入框，登录页的邮箱/密码是原生 `<input>` → 粘不进去。
+现在分流：焦点在 Slate → 四通道插入；否则找可见的原生输入框
+（没聚焦就取第一个空着的，登录页正好是 邮箱→密码 顺序），
+用页面 realm 的原生 value setter + input/change 事件写入（React 受控组件安全）。
+
+---
+
+## v3.7.3 — 2026-09-06
+
+### 🤖 模拟器里 Ctrl+V 能粘贴了（安卓）
+
+MuMu 会把 Windows 剪贴板同步进安卓剪贴板，但 Ctrl+V 按键到不了
+GeckoView 的网页输入框 → 粘不上。现在内容脚本在 GeckoView 上开
+`connectNative('app')` 长连接，壳拦下 Ctrl+V 把剪贴板文本推给页面，
+走 `insertIntoComposer` 四通道写进 Slate 输入框（桌面端不受影响）。
+
+---
+
 ## v3.7.2 — 2026-09-06
 
 ### 🤖 新 emoji 不再显示「口」（安卓）

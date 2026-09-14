@@ -157,6 +157,11 @@ async function nsfwCheck(dataUrl) {
   }
 }
 
+/* 【粘贴不走这里】GeckoView 155 的 native messaging 是断的
+ * (NativeManifests: "Native manifests are not supported on android"),
+ * App→页面粘贴改走 App 侧的 SessionTextInput InputConnection (IME 同机制)。
+ * 这里只保留下载方向 (background → App), 在 155 上同样断, 留待 Mozilla 修复。 */
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return;
 

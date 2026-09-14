@@ -2059,6 +2059,10 @@
     } catch (e) {}
   }
 
+  /* 【粘贴不走扩展】GeckoView 155 的 native messaging 整条是断的
+   * (内容脚本 connectNative 被拒 + 后台方向也炸 NativeManifests)。
+   * 安卓粘贴由 App 侧 SessionTextInput.commitText 直接完成 (IME 同机制)。 */
+
   /* GeckoView (安卓壳) 才注入 emoji 兜底字体 —— 判定只能问后台 (内容脚本看不到 contextMenus) */
   if (EXT) {
     try {

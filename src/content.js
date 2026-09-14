@@ -2021,6 +2021,11 @@
        * (COLR) 却能正常加载。Gecko 不接受网页字体里的 CBDT, 换 COLRv1 立刻好。 */
       const url = chrome.runtime.getURL('fonts/NotoColorEmoji-COLRv1.ttf');
       const RANGE = 'U+1F000-1FAFF,U+2600-27BF,U+2B00-2BFF,U+2190-21FF,U+2300-23FF,U+FE0F,U+200D';
+      /* 【数学花体字母】Discord 里满屏的 𝑩𝑶𝑻 / 𝑨𝒂𝒂𝒍𝒊𝒄𝒆 (U+1D400-1D7FF) 不是 emoji,
+       * 是 Unicode 数学字母数字符号。安卓系统字体（尤其模拟器）常缺这些字形 → 灰块。
+       * 用 Noto Sans Math 补上（单色文本字体, 跟着文字颜色走）。 */
+      const mathUrl = chrome.runtime.getURL('fonts/NotoSansMath-Regular.ttf');
+      const MATH_RANGE = 'U+1D400-1D7FF,U+2100-214F,U+2200-22FF,U+2A00-2AFF';
       /* 【必须用 <style> 里的 @font-face, 不能用 FontFace API】
        * 实测: 内容脚本里 document.fonts.add(new FontFace(...)) 注册的字体不会生效
        * (内容脚本有 Xray 隔离, 构造出来的 FontFace 绑在错误的 realm 上) ——
@@ -2031,12 +2036,13 @@
       const mono = "'gg mono','Source Code Pro',Consolas,'Andale Mono',Menlo,monospace";
       st.textContent =
         "@font-face{font-family:'MoeEmoji';src:url('" + url + "');unicode-range:" + RANGE + ';}' +
+        "@font-face{font-family:'MoeMath';src:url('" + mathUrl + "');unicode-range:" + MATH_RANGE + ';}' +
         ':root{' +
-        "--font-primary:'MoeEmoji'," + tail + ' !important;' +
-        "--font-display:'MoeEmoji'," + tail + ' !important;' +
-        "--font-headline:'MoeEmoji'," + tail + ' !important;' +
-        "--font-monospace:'MoeEmoji'," + mono + ' !important;' +
-        "--font-code:'MoeEmoji'," + mono + ' !important;}';
+        "--font-primary:'MoeEmoji','MoeMath'," + tail + ' !important;' +
+        "--font-display:'MoeEmoji','MoeMath'," + tail + ' !important;' +
+        "--font-headline:'MoeEmoji','MoeMath'," + tail + ' !important;' +
+        "--font-monospace:'MoeEmoji','MoeMath'," + mono + ' !important;' +
+        "--font-code:'MoeEmoji','MoeMath'," + mono + ' !important;}';
       (document.head || document.documentElement).appendChild(st);
       stamp('emoji-font', 'injected');
     } catch (e) { stamp('err', 'font:' + e.message); }

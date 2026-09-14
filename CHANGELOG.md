@@ -6,6 +6,20 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.7.10 — 2026-09-14
+
+### 🤖 补 Noto Sans Math：频道名里的数学花体字母不再是灰块
+
+Discord 里常见的 `𝑩𝑶𝑻` / `𝑨𝒂𝒂𝒍𝒊𝒄𝒆`（U+1D400–U+1D7FF Unicode 数学字母数字符号）
+**不是 emoji**，安卓系统字体（尤其模拟器）常缺这些字形 → 显示成灰方块。
+随扩展打包 **Noto Sans Math v3.000**，用第二条 `@font-face` 按
+`U+1D400-1D7FF,U+2100-214F,U+2200-22FF,U+2A00-2AFF` 范围补上，
+字体栈里排在 emoji 字体之后（两者范围不相交）。GeckoView 专属，桌面不注入。
+
+实测：搜索框输入 `𝑩𝑶𝑻` 正确渲染为粗斜体 BOT。
+
+---
+
 ## v3.7.9 — 2026-09-14
 
 ### 🤖 emoji 字体换成 Noto Color Emoji COLRv1（修新 emoji 灰块）

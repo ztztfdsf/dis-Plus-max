@@ -49,6 +49,7 @@ const GLOBALS = `
   Blob File FileReader FormData Headers Request Response URL URLSearchParams
   AbortController AbortSignal Image ImageData ImageBitmap createImageBitmap
   OffscreenCanvas HTMLCanvasElement HTMLImageElement HTMLElement Element Node NodeList
+  FontFace FontFaceSet
   Event CustomEvent MouseEvent KeyboardEvent InputEvent ClipboardEvent DragEvent
   PointerEvent WheelEvent DataTransfer MutationObserver IntersectionObserver ResizeObserver
   TextEncoder TextDecoder CompressionStream DecompressionStream

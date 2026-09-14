@@ -6,6 +6,36 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.7.9 — 2026-09-14
+
+### 🤖 emoji 字体换成 Noto Color Emoji COLRv1（修新 emoji 灰块）
+
+根因两层：
+1. 原字体 Twemoji Mozilla **v0.7.0（2022-10）只覆盖到 Unicode 14** —— 🩷🫨🩵🪿🫸
+   这类 Unicode 15/16 新 emoji 全部缺字形，在输入框里显示成灰方块（实测截图坐实）。
+2. Discord 的 CSP `font-src` 里没有 `moz-extension:`，注入的字体被拦死。
+
+改为：
+- 打包 **Noto Color Emoji COLRv1 v2.051**（覆盖 Unicode 15/16）。
+  **不能藏 CBDT 位图版**：CBDT 在 `@font-face` 里加载无效，emoji 反而全变灰块（实测）。
+- 注入必须用 `<style>` 里的 `@font-face`，**不能用 FontFace API**（内容脚本 Xray 隔离）。
+- GeckoView 上用 `webRequest.onHeadersReceived` 把 `moz-extension:` 加进 `font-src`。
+
+桌面浏览器无变化（系统自带 emoji 字体，不需要也不注入）。
+
+---
+
+## v3.7.8 — 2026-09-14
+
+### 🤖 GeckoView 上放行 moz-extension 字体（CSP font-src）
+
+实测 discord.com 响应头 `font-src` 只有 `'self'` + 几个 https 域，没有
+`moz-extension:` / `data:` / `blob:` → 内容脚本注入的 face 字体直接加载失败。
+用 `webRequest` 改写响应头补上 `moz-extension:`。新增 `webRequest` /
+`webRequestBlocking` 权限。仍不解决字体本身的覆盖面问题（见 v3.7.9）。
+
+---
+
 ## v3.7.7 — 2026-09-14
 
 ### 🤖 移除 GeckoView 粘贴中继（整条 native messaging 在 155 上是死的）

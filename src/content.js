@@ -2013,14 +2013,24 @@
    * 只在 GeckoView 上注入: 桌面系统 emoji 完整, 不抢原生观感。 */
   function injectEmojiFont() {
     try {
-      const url = chrome.runtime.getURL('fonts/TwemojiMozilla.ttf');
+      /* 【字体选型】Noto Color Emoji COLRv1 v2.051 (2025-08), 覆盖 Unicode 15/16;
+       * 旧的 Twemoji Mozilla v0.7.0 (2022-10) 只到 Unicode 14 —— 这就是新 emoji
+       * (🩷🫨🩵🪿🫸…) 在输入框里显示成灰块的根因。
+       * 【必须 COLR/COLRv1, 不能用 CBDT 位图版】实测 @font-face 加载 CBDT
+       * (NotoColorEmoji.ttf) 完全失效: emoji 全部回退成灰块 —— Twemoji Mozilla
+       * (COLR) 却能正常加载。Gecko 不接受网页字体里的 CBDT, 换 COLRv1 立刻好。 */
+      const url = chrome.runtime.getURL('fonts/NotoColorEmoji-COLRv1.ttf');
+      const RANGE = 'U+1F000-1FAFF,U+2600-27BF,U+2B00-2BFF,U+2190-21FF,U+2300-23FF,U+FE0F,U+200D';
+      /* 【必须用 <style> 里的 @font-face, 不能用 FontFace API】
+       * 实测: 内容脚本里 document.fonts.add(new FontFace(...)) 注册的字体不会生效
+       * (内容脚本有 Xray 隔离, 构造出来的 FontFace 绑在错误的 realm 上) ——
+       * emoji 会直接回退到系统字体, 新 emoji 又变灰块。 */
       const st = document.createElement('style');
       st.id = 'moe-emoji-font';
       const tail = "'gg sans','Noto Sans','Helvetica Neue',Helvetica,Arial,sans-serif";
       const mono = "'gg mono','Source Code Pro',Consolas,'Andale Mono',Menlo,monospace";
       st.textContent =
-        "@font-face{font-family:'MoeEmoji';src:url('" + url + "');" +
-        'unicode-range:U+1F000-1FAFF,U+2600-27BF,U+2B00-2BFF,U+2190-21FF,U+2300-23FF,U+FE0F,U+200D;}' +
+        "@font-face{font-family:'MoeEmoji';src:url('" + url + "');unicode-range:" + RANGE + ';}' +
         ':root{' +
         "--font-primary:'MoeEmoji'," + tail + ' !important;' +
         "--font-display:'MoeEmoji'," + tail + ' !important;' +

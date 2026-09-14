@@ -1,10 +1,19 @@
 {
   "manifest_version": 3,
   "name": "MoeGuard 喵图混淆",
-  "version": "3.7.7",
+  "version": "3.7.9",
   "description": "Discord 图片上传自动混淆（流光照影）：只有装了本插件的人才能看到原图。轻量、无损、无需密钥，可选只混淆色情图片。",
-  "permissions": ["storage", "contextMenus", "downloads", "nativeMessaging"],
-  "optional_host_permissions": ["https://*/*"],
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "downloads",
+    "nativeMessaging",
+    "webRequest",
+    "webRequestBlocking"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
   "host_permissions": [
     "https://discord.com/*",
     "https://cdn.discordapp.com/*",
@@ -17,14 +26,28 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://discord.com/*"],
-      "js": ["src/core.js", "src/review.js", "src/format.js", "src/hook.js"],
+      "matches": [
+        "https://discord.com/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/review.js",
+        "src/format.js",
+        "src/hook.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN"
     },
     {
-      "matches": ["https://discord.com/*"],
-      "js": ["src/core.js", "src/review.js", "src/format.js", "src/content.js"],
+      "matches": [
+        "https://discord.com/*"
+      ],
+      "js": [
+        "src/core.js",
+        "src/review.js",
+        "src/format.js",
+        "src/content.js"
+      ],
       "run_at": "document_idle",
       "world": "ISOLATED"
     }
@@ -37,7 +60,7 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "fonts/TwemojiMozilla.ttf"
+        "fonts/NotoColorEmoji-COLRv1.ttf"
       ],
       "matches": [
         "https://discord.com/*"

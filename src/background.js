@@ -30,6 +30,34 @@ function dbgSave() { try { chrome.storage.session.set({ moeDbg: dbg }); } catch 
 /* 【GeckoView 没有 contextMenus】安卓套壳里这个 API 是 undefined,
  * 不判空的话整个后台脚本在加载时就崩 → 消息全灭, 解码/审查全瘫。 */
 const HAS_MENUS = (() => { try { return !!(chrome.contextMenus && chrome.contextMenus.create); } catch (e) { return false; } })();
+
+/* 【GeckoView 专属: 放行 emoji 字体】实测 discord.com 响应头 CSP:
+ *   font-src 'self' https://fonts.gstatic.com https://cash-f.squarecdn.com ...
+ * 不含 moz-extension: / data: / blob: —— 内容脚本注入的 @font-face 指向
+ * moz-extension:// 字体直接被 CSP 拦死 → Twemoji 加载不了 → 新 emoji 全灰块。
+ * 用 webRequest 把 moz-extension: 加进 font-src。桌面端系统自带 emoji 字体,
+ * 不需要也不动它。uBlock 在 Firefox Android 上能用证明 GeckoView 支持 blocking。 */
+if (!HAS_MENUS) {
+  try {
+    chrome.webRequest.onHeadersReceived.addListener(
+      (details) => {
+        try {
+          const headers = (details.responseHeaders || []).map((h) => {
+            if (h && h.name && h.name.toLowerCase() === 'content-security-policy'
+                && typeof h.value === 'string' && /font-src /.test(h.value)) {
+              h.value = h.value.replace(/font-src /, 'font-src moz-extension: ');
+            }
+            return h;
+          });
+          return { responseHeaders: headers };
+        } catch (e) { return {}; }
+      },
+      { urls: ['https://discord.com/*'], types: ['main_frame', 'subframe'] },
+      ['blocking', 'responseHeaders']
+    );
+  } catch (e) { try { console.warn('[MoeGuard] CSP font-src 放行注册失败', e); } catch (e2) {} }
+}
+
 if (HAS_MENUS) {
   chrome.runtime.onInstalled.addListener(() => {
     try { chrome.contextMenus.removeAll(() => createMenus()); } catch (e) { createMenus(); }

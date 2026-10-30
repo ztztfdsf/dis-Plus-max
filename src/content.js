@@ -150,6 +150,34 @@
     } catch (e) { return false; }
   }
 
+  /* ---------- 从 img 反查附件原始地址 (2026+ Discord 新 DOM) ----------
+   * 2026 起 Discord 把消息图渲染成 blob:https://discord.com/… (lazyImg 组件
+   * 自己 fetch 媒体代理的 webp 再转 objectURL), img.src 里再也看不到附件地址,
+   * isAttachment(blob:) 永不命中 → 整条解码管线一张都不接 (实测 diag new=0)。
+   * 原始附件地址只存在于同容器的 originalLink 锚点:
+   *   href          = cdn.discordapp.com 原图 (带 ex/is/hm 签名, 首选)
+   *   data-safe-src = 媒体代理重编码 URL (兜底, toOriginalUrl 会回源)
+   * 【防串图】只认「恰好 1 个附件锚点、且 img ≤ 2 个(真图+占位)」的那一层,
+   *   否则多图 mosaic 里爬高层会命中别的图的锚点 → 解码结果串图。 */
+  function origUrlFor(img) {
+    try {
+      let el = img;
+      for (let i = 0; i < 5 && el; i++, el = el.parentElement) {
+        if (!el.querySelectorAll) continue;
+        const as = el.querySelectorAll('a[href*="discordapp.com/attachments/"], a[data-safe-src*="discordapp.com/attachments/"]');
+        if (!as.length) continue;
+        if (as.length !== 1 || el.querySelectorAll('img').length > 2) return '';
+        const a = as[0];
+        const h = a.getAttribute('href') || '';
+        if (isAttachment(h)) return toOriginalUrl(h);
+        const ss = a.getAttribute('data-safe-src') || '';
+        if (ss && isAttachment(ss)) return toOriginalUrl(ss);
+        return '';
+      }
+    } catch (e) {}
+    return '';
+  }
+
   /* ---------- 共用字体 (跟 Discord 主题变量) ---------- */
   const FONT = 'var(--font-primary),"Segoe UI","Microsoft YaHei",sans-serif';
 
@@ -337,16 +365,24 @@
     try {
       if (!img || img.dataset.moeFullRes) return false;
       const s = img.currentSrc || img.src || '';
-      if (!s || /^(blob:|data:)/.test(s)) return false;        // 已解码的喵图
-      if (!isAttachment(s)) return false;
-      let hasDownscale = false;
-      try {
-        const u = new URL(s, location.href);
-        hasDownscale = ['width', 'height', 'format', 'quality', 'size'].some((k) => u.searchParams.has(k));
-      } catch (e) { return false; }
-      if (!hasDownscale) return false;                          // 本来就是原图
-      const full = toOriginalUrl(s);
-      if (!full || full === s) return false;
+      if (!s) return false;
+      let full = '';
+      if (/^(blob:|data:)/.test(s)) {
+        if (img.dataset.moeScan === 'decoded') return false;    // 解码产物本身就是全尺寸
+        // 2026+ blob: 渲染 —— blob 是媒体代理的降采样 webp, 原图在锚点 href 上
+        full = origUrlFor(img);
+        if (!full) return false;
+      } else {
+        if (!isAttachment(s)) return false;
+        let hasDownscale = false;
+        try {
+          const u = new URL(s, location.href);
+          hasDownscale = ['width', 'height', 'format', 'quality', 'size'].some((k) => u.searchParams.has(k));
+        } catch (e) { return false; }
+        if (!hasDownscale) return false;                        // 本来就是原图
+        full = toOriginalUrl(s);
+        if (!full || full === s) return false;
+      }
       img.dataset.moeFullRes = 'loading';
       const pre = new Image();
       pre.decoding = 'async';
@@ -377,6 +413,7 @@
     img.dataset.moeOrig = raw;
     img.dataset.moeScan = 'decoded';
     img.dataset.moeScanSrc = raw;
+    img.dataset.moeUrl = url;   // 记住我们写的 src, 用于识别「被 Discord 重渲染覆盖」
     /* 【必须先比再写】赋值相同的 src 仍会触发 MutationObserver 记录
      * (DOM 规范: setAttribute 不做相等短路), 而观察器回调里又会回到这里
      * → 微任务无限循环, 页面直接冻住 (3.4.1 实测过)。 */
@@ -398,10 +435,13 @@
   function swapIfKnown(img) {
     /* 【关键防循环】已接管的图直接跳。
      * 不能只靠 raw 是不是 blob 来判: 刚写完 img.src 后, currentSrc 还是旧的
-     * CDN 地址 (资源选择是异步的) → 又会命中 decodedSync → 又写一次 src → 死循环。 */
-    if (img.dataset.moeScan === 'decoded') return true;
-    const raw = img.currentSrc || img.src || '';
-    if (!raw || /^(blob:|data:)/.test(raw) || !isAttachment(raw)) return false;
+     * CDN 地址 (资源选择是异步的) → 又会命中 decodedSync → 又写一次 src → 死循环。
+     * 【2026+】Discord 重渲染可能把 src 覆盖回它自己的 blob → 比对 moeUrl,
+     * 不一致就不再跳过, 由 decodedSync 立刻夺回来。 */
+    if (img.dataset.moeScan === 'decoded' && img.dataset.moeUrl === img.getAttribute('src')) return true;
+    let raw = img.currentSrc || img.src || '';
+    if (!raw || /^(blob:|data:)/.test(raw)) raw = origUrlFor(img);   // 2026+ blob: 渲染
+    if (!raw || !isAttachment(raw)) return false;
     const hit = decodedSync.get(attachKey(raw));
     if (!hit || !hit.url) return false;
     applyDecoded(img, raw, hit);
@@ -461,11 +501,17 @@
     const vh = window.innerHeight || 800;
     const cand = [];
     for (const img of imgs) {
-      const raw = img.currentSrc || img.src || '';
-      // src 变了就重新审视 (Discord 会复用 img 元素: 惰加载占位图→真图、切频道复用)
-      if (img.dataset.moeScan && img.dataset.moeScanSrc === raw) continue;
-      if (!raw || /^(blob:|data:)/.test(raw)) continue;
-      if (img.dataset.moeScan === 'decoded' && img.src.indexOf('blob:') === 0) continue;  // 已接管
+      /* 占位模糊图跳过 (2026+ lazyImg: 占位与真图是两个 <img>, 治占位图会打架) */
+      if (/placeholder/i.test(img.className || '')) continue;
+      let raw = img.currentSrc || img.src || '';
+      if (!raw || /^(blob:|data:)/.test(raw)) raw = origUrlFor(img);   // 2026+ blob: 渲染
+      if (!raw) continue;
+      if (img.dataset.moeScan === 'decoded') {
+        if (img.dataset.moeUrl === img.getAttribute('src')) continue;  // 已接管, 未被覆盖
+        // 被 Discord 重渲染覆盖 → 落回下面流程, swapIfKnown 用 decodedSync 立刻夺回
+      } else if (img.dataset.moeScan && img.dataset.moeScanSrc === raw) {
+        continue;   // src 没变就不再审视 (Discord 会复用 img 元素)
+      }
       if (!isAttachment(raw) && !DEV_ANY_IMAGE) {
         img.dataset.moeScan = 'skip'; img.dataset.moeScanSrc = raw; skip++; continue;
       }
@@ -843,6 +889,24 @@
   }
 
   async function decodeUrlModal(rawUrl) {
+    /* 右键菜单/长按拿到的可能是 blob: (2026+ 渲染) → 反查原始附件地址 */
+    if (!rawUrl || /^(blob:|data:)/.test(rawUrl)) {
+      let found = '';
+      try {
+        for (const im of document.images) {
+          if ((im.currentSrc || im.src) === rawUrl) { found = origUrlFor(im); break; }
+        }
+      } catch (e) {}
+      rawUrl = found;
+    }
+    if (!rawUrl) {
+      const e0 = document.createElement('div');
+      e0.style.cssText = 'color:var(--text-default,#2e3338);font:400 14px/1.6 ' + FONT + ';text-align:center;padding:20px;max-width:380px;';
+      e0.textContent = '找不到这张图的原始附件地址。';
+      const b0 = makeBtn('关闭'); b0.onclick = closeModal;
+      openModal('解码结果', e0, [b0]);
+      return;
+    }
     const orig = toOriginalUrl(rawUrl);
     toast('正在解码…', 4000);
     // 手动解码跳过预筛 (用户明确要求就不省流量)
@@ -2059,7 +2123,8 @@
         try {
           const img = e.target && e.target.closest ? e.target.closest('img[src]') : null;
           if (!img) { lp = null; return; }
-          const raw = img.currentSrc || img.src || '';
+          let raw = img.currentSrc || img.src || '';
+          if (!raw || /^(blob:|data:)/.test(raw)) raw = origUrlFor(img);   // 2026+ blob: 渲染
           if (!raw || !isAttachment(raw)) { lp = null; return; }
           cancel();
           lp = { fired: false, t: setTimeout(() => { lp.fired = true; decodeUrlModal(raw); }, 550) };

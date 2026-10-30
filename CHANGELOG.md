@@ -6,6 +6,27 @@ Firefox 用非持久 event page），所以修复往往三端共享，但**触�
 
 ---
 
+## v3.7.11 — 2026-10-30
+
+### 🔓 修 Discord 2026 新渲染导致的解码失效（消息图全走 blob:，扫描器一张不接）
+
+根因（现场一手证据）：2026 年 Discord 网页改了消息图渲染 —— lazyImg 组件自己
+fetch 媒体代理的 webp，再以 `blob:https://discord.com/…` 当 `<img>` src，img 上再也
+看不到 media.discordapp.net/attachments/ 地址 → `isAttachment(blob:)` 永不命中 →
+解码管线整条跳过（诊断面板 `new=0`），看到的一直是混淆图。
+
+**不是平台剥块**：自测喵图的 cdn 原图 `moEg`/`moMt` 块完好（IHDR 1048×1304 →
+`6d 6f 45 67` 标记 + 120KB 工作流元数据），无损还原 832×1216 复核通过 ——
+字节层没变，纯粹是网页渲染方式变了。
+
+修法：src 拿不到地址就从同容器的 originalLink 锚点反查 —— `href` = cdn 原图
+（带 ex/is/hm 签名，首选），`data-safe-src` = 媒体代理重编码 URL（兜底回源）。
+只认「恰好一个附件锚点」的那一层，防多图 mosaic 串位。配套：解码结果记 `moeUrl`，
+Discord 重渲染覆盖 src 时立刻夺回；占位模糊图跳过（占位与真图是两个 <img>）；
+右键/长按解码与大图弹窗原图升级同步兼容 blob: 渲染。
+
+---
+
 ## v3.7.10 — 2026-09-14
 
 ### 🤖 补 Noto Sans Math：频道名里的数学花体字母不再是灰块

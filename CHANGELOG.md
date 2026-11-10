@@ -1,12 +1,44 @@
 ﻿# 更新日志
 
 本文件按浏览器分段记录每个版本的改动。
-三个包同源同码，只有 manifest 与后台形态不同（Chrome/Edge 用 `service_worker`，
-Firefox 用非持久 event page），所以修复往往三端共享，但**触发条件与可见症状不同**。
+四个包同源同码：三个扩展包只有 manifest 与后台形态不同（Chrome/Edge 用 `service_worker`，
+Firefox 用非持久 event page），油猴版则是同一份内核换成 `GM_*` 的单文件形态。
+所以修复往往四端共享，但**触发条件与可见症状不同**。
 
 ---
 
-## v3.7.11 — 2026-10-30
+## v3.7.11 — 2026-11-10（新增第 4 个包：油猴单文件版）
+
+### 🐵 油猴版（`moeguard.user.js`）
+
+把整个扩展原样移植成单文件油猴脚本（260+ KB，零外部依赖）。算法 / 审查层 / 解码管线 /
+表情贴纸解锁 / 各种 realm 与 blob: 渲染兼容全部沿用同一份源码，**内核零改写**：
+
+- 在 IIFE 里用 `const chrome = {...}` 影子掉页面的 `window.chrome`，把
+  `runtime.sendMessage / storage / tabs / downloads / permissions` 全落到 `GM_*`，
+  因此 `content.js` / `popup.js` / `options.js` 一行都不用改。
+- 弹窗与设置页合并成页内浮层（`Alt+M`），原两份 HTML/CSS/JS 原样搬进去，分别作用域。
+- 原生右键菜单换成页内菜单（只接管附件图，`Shift+右键` 放行给 Discord）。
+- `build-user.js` 从 `manifest.json` 取版本、带断言拼接，锚点丢失直接报错退出，
+  不会静默出一个半残的包。
+
+### 🔧 顺手修掉的上游 bug（扩展版同样受益）
+
+| 症状 | 根因 |
+|---|---|
+| 点「解码本页所有图片」后图再也回不来 | 重扫删了 `data-moe-scan*`，而图此时已是 `blob:`，原始地址只剩 `data-moe-orig` → 之后每轮扫描算不出 `raw` 直接跳过 |
+| 图已拖进输入框，按 Enter 后附件卡 45 秒 | 发送意图在「解码+指纹」预处理完成前到达 → 队列还空着，意图被丢弃，只能等 TTL |
+| 删预览图/切频道后仍会上传 | `abort()` 只能看见已入队的项，预处理期与放行期的取消都看不见 |
+| 同时发两张相似图，可能有一张原图直出 | 内容键没命中时回退到感知指纹容差匹配，A 图的「原图直通」会套到 B 图上 |
+
+### 🔬 审查
+
+五个不同模型的子代理各查一个角度（加载时序 / 上传链路 / 面板 UI / 油猴环境 / 打包器），
+共 20 条发现：17 条已修并写了用例钉住，3 条属上游设计取舍（编码失败 fail-open、
+`fetch` 分支不进挂起队列、45s TTL 自动放行），已在 `README-userscript.md` 里明写。
+
+验收：`node dev/run.js` 29/29（真 Chrome headless，canvas/PNG/DOM 全真跑）、
+`node tests/core.test.js` 64/64。
 
 ### 🔓 修 Discord 2026 新渲染导致的解码失效（消息图全走 blob:，扫描器一张不接）
 

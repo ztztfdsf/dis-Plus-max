@@ -283,3 +283,21 @@ for (const r of rows) {
 console.log(`\n产物目录: ${path.relative(process.cwd(), DIST) || 'dist'}`);
 console.log('加载方式: Chrome/Edge → 扩展页开发者模式「加载已解压的扩展程序」选 dist/<target>/');
 console.log('          Firefox   → about:debugging「临时载入」选 dist/firefox/manifest.json');
+
+/* ══════════════════ 第 4 个包：油猴单文件 ══════════════════
+ * 以后发版固定 4 个资产：chrome.zip / edge.zip / firefox.zip / moeguard.user.js。
+ * build-user.js 自己就是可执行脚本, 这里 require 它顶部的拼装逻辑不可行(它带副作用),
+ * 所以直接子进程跑一遍 —— 它在构建失败时会非零退出。 */
+if (!want.length || want.indexOf('userscript') >= 0) {
+  const r = require('child_process').spawnSync(process.execPath, [path.join(ROOT, 'build-user.js')], { stdio: 'inherit' });
+  if (r.status !== 0) {
+    console.error('  ✗ userscript 构建失败');
+    process.exitCode = 1;
+  } else {
+    const uf = path.join(DIST, 'moeguard.user.js');
+    const st = fs.statSync(uf);
+    console.log(`  ✓ userscript 单文件  ${(st.size / 1024).toFixed(1).padStart(7)} KB  moeguard.user.js`);
+    console.log(`    ${''.padEnd(8)} 安装: Tampermonkey 新建脚本全选粘贴 / 拖入浏览器   sha256: ${sha256(fs.readFileSync(uf)).slice(0, 16)}…`);
+    console.log(`    ${''.padEnd(8)} 注意: 与扩展版共存时 hook 会被安装守卫拦住(不会双双混淆), 但没必要同时开`);
+  }
+}

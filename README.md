@@ -196,6 +196,11 @@ PNG 是无损格式，压缩等级只影响体积不影响像素。
 | `moeguard-chrome-<版本>.zip` | Chrome |
 | `moeguard-edge-<版本>.zip` | Edge |
 | `moeguard-firefox-<版本>.zip` | Firefox |
+| `moeguard.user.js` | **油猴单文件版**（Tampermonkey / Violentmonkey，装法见 [README-userscript.md](README-userscript.md)）|
+
+油猴版是扩展版的原样移植：算法、审查、解码管线、UI 全部沿用同一份源码，内核零改写，
+只是把 `chrome.*` 换成 `GM_*`、把弹窗/设置页搬进页内浮层（`Alt+M` 打开）。
+与扩展版共存时 hook 有安装守卫，不会双双混淆；但没必要同时开。
 
 ### 方式二：自己构建
 
@@ -204,8 +209,11 @@ PNG 是无损格式，压缩等级只影响体积不影响像素。
 ```bash
 git clone https://github.com/ztztfdsf/dis-Plus-max.git
 cd dis-Plus-max
-node build.js              # 产出全部三个包到 dist/
-node build.js firefox      # 只构建一个
+node build.js              # 产出全部四个包到 dist/（3 个扩展 zip + 1 个 .user.js）
+node build.js firefox      # 只构建一个扩展
+node build.js userscript   # 只构建油猴版
+node build-user.js         # 同上，单独跑油猴打包
+node dev/run.js            # 油猴版真 Chrome 验收（29 条用例）
 ```
 
 **构建是可复现的** —— zip 内时间戳固定，同一份源码永远产出相同字节。

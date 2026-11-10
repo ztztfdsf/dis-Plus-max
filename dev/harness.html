@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>MoeGuard 油猴版 · 本地仿真台</title>
+<style>
+  html, body { margin: 0; background: #313338; color: #ddd; font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif; }
+  main { padding: 16px 20px; }
+  ul { list-style: none; padding: 0; }
+  li { margin-bottom: 12px; }
+  img { max-width: 320px; border-radius: 6px; }
+  #composer { margin-top: 12px; padding: 8px; background: #383a40; border-radius: 6px; min-height: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h3>仿真 Discord 消息流</h3>
+  <ul data-list-id="chat-messages">
+    <li><img id="moeimg" width="320" alt="待解码" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></li>
+    <li><img id="rawimg" width="320" alt="右键菜单目标" src="https://cdn.discordapp.com/attachments/1/2/notfound.png"></li>
+  </ul>
+  <div id="composer" role="textbox" class="slateTextArea" contenteditable="true">hello</div>
+  <button id="nativebtn">Discord 自己的按钮</button>
+</main>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════
+ * GM_* 打桩 —— 必须在 userscript 之前执行, 模拟 Tampermonkey 的运行环境。
+ * 所有网络进出都落到本机 Node 静态服务器上 (见 run.js)。
+ * ══════════════════════════════════════════════════════════════════ */
+(function () {
+  /* 预置配置: nsfwOnly=false 才走「全部混淆」, 让上传用例可确定地验证换体 */
+  const seed = { 'moeguard.cfg': { enabled: true, autoDecode: true, badge: true, nsfwOnly: false, salt: '', tile: 0, maxDim: 0, skipAnimated: true, nsfwThreshold: 0.7, reviewMode: 'local' } };
+  localStorage.setItem('__gmstore', JSON.stringify(seed));
+  const store = JSON.parse(localStorage.getItem('__gmstore') || '{}');
+  window.__gmStore = store;
+
+  window.GM_getValue = (k, d) => (k in store ? store[k] : d);
+  window.GM_setValue = (k, v) => { store[k] = v; localStorage.setItem('__gmstore', JSON.stringify(store)); };
+  window.GM_registerMenuCommand = () => {};
+  window.__gmDl = [];
+  window.GM_download = (o) => { window.__gmDl.push({ url: String(o && o.url || ''), name: o && o.name }); };
+  window.GM_getResourceURL = () => '';
+
+  /* 跨域 URL 落到本机: https://<任意主机><path> → <path> */
+  function localize(u) {
+    try { return new URL(u, location.href).pathname + new URL(u, location.href).search; } catch (e) { return u; }
+  }
+  window.__gmXhrLog = [];
+  window.GM_xmlhttpRequest = function (opt) {
+    window.__gmXhrLog.push({ url: opt.url, method: opt.method || 'GET', range: opt.headers && opt.headers.Range });
+    const init = { method: opt.method || 'GET', headers: opt.headers || {} };
+    if (opt.data !== undefined) init.body = opt.data;
+    fetch(localize(opt.url), init)
+      .then(async (r) => {
+        const buf = await r.arrayBuffer();
+        let text = '';
+        try { text = new TextDecoder().decode(buf); } catch (e) {}
+        if (opt.onload) opt.onload({
+          status: r.status,
+          responseHeaders: 'content-type: ' + (r.headers.get('content-type') || 'application/octet-stream') + '\r\n',
+          response: buf, responseText: text,
+        });
+      })
+      .catch((e) => { if (opt.onerror) opt.onerror(e); });
+  };
+
+  /* XHR 打桩: 只记账, 不真发 —— 这样能被 hook 当成 origSend 包起来,
+   * 于是「放行后的最终字节」原封不动落在 __net 里, 可以验货。 */
+  window.__net = { requests: [], last: null };
+  const oOpen = XMLHttpRequest.prototype.open;
+  const oSet = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.open = function (m, u) {
+    this.__net = { method: String(m || '').toUpperCase(), url: String(u || ''), hdrs: {}, body: null };
+    return oOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.setRequestHeader = function (k, v) {
+    try { if (this.__net) this.__net.hdrs[String(k)] = String(v); } catch (e) {}
+    return oSet.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    const rec = { method: this.__net && this.__net.method, url: this.__net && this.__net.url, hdrs: this.__net && this.__net.hdrs,
+                  bytes: null, kind: body && body.constructor ? body.constructor.name : typeof body };
+    if (body instanceof ArrayBuffer) rec.bytes = new Uint8Array(body);
+    else if (ArrayBuffer.isView(body)) rec.bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    else if (body instanceof Blob) { rec.kind = 'Blob'; rec._blob = body; }
+    window.__net.requests.push(rec);
+    window.__net.last = rec;
+    if (body instanceof Blob) body.arrayBuffer().then((b) => { rec.bytes = new Uint8Array(b); });
+    try { this.dispatchEvent(new Event('load')); this.dispatchEvent(new Event('loadend')); } catch (e) {}
+    this.readyState = 4; this.status = 200;
+    if (this.onreadystatechange) { try { this.onreadystatechange(); } catch (e) {} }
+  };
+})();
+</script>
+
+<script src="/dist/moeguard.user.js"></script>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════
+ * 验收用例 —— 全部对着真实浏览器跑, 不 mock canvas / PNG / DOM。
+ * 结果 POST 回 run.js 打印。
+ * ══════════════════════════════════════════════════════════════════ */
+(async function () {
+  window.addEventListener('error', (e) => {
+    try { fetch('/log', { method: 'POST', body: 'ERR ' + (e.message || '') + ' @' + (e.filename || '') + ':' + (e.lineno || 0) }); } catch (er) {}
+  });
+  const results = [];
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  function ok(name, cond, extra) { results.push({ name, pass: !!cond, extra: extra === undefined ? '' : String(extra) }); }
+  function report() { return fetch('/report', { method: 'POST', body: JSON.stringify(results) }); }
+
+  /* 与 shim 的 readAll 同语义: 旧整包快照打底 + 每个键覆盖 */
+  function gmCfg() {
+    const st = window.__gmStore || {};
+    const out = Object.assign({}, st['moeguard.cfg'] || {});
+    const idx = st['moeguard.cfg.keys'] || [];
+    for (const k of idx) if ((('moeguard.cfg.' + k) in st)) out[k] = st['moeguard.cfg.' + k];
+    return out;
+  }
+  function paint(w, h, fn) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    fn(ctx, w, h);
+    return c;
+  }
+  function canvasBlob(c, type) {
+    return new Promise((res) => c.toBlob(res, type || 'image/png'));
+  }
+  const srcCanvas = paint(240, 180, (ctx, w, h) => {
+    const g = ctx.createLinearGradient(0, 0, w, h);
+    g.addColorStop(0, '#ff9bd2'); g.addColorStop(1, '#7c6bf0');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('MoeGuard', 20, 60);
+    for (let i = 0; i < 12; i++) { ctx.fillStyle = i % 2 ? '#22203a' : '#e8e2f5'; ctx.fillRect(16 + i * 16, 120, 10, 10); }
+  });
+
+  /* ---------- 1. 装载 ---------- */
+  ok('脚本装载: core / format / review 三个全局都在',
+    !!window.__MoeGuardCore && !!window._moeFormat && !!window.__MoeGuardReview);
+  ok('注入世界 = page (hook 才有意义)', window.__moeWorld === 'page', window.__moeWorld);
+
+  await sleep(600);   // 等 content.js 在 DOMContentLoaded 之后 boot
+
+  /* ---------- 2. 面板 ---------- */
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', altKey: true, bubbles: true }));
+  await sleep(200);
+  const panel = document.getElementById('moe-panel');
+  ok('Alt+M 打出面板', !!panel && panel.style.display !== 'none');
+  const tabBtns = panel ? panel.querySelectorAll('.moe-tab') : [];
+  ok('面板有 弹窗/设置 两个页签', tabBtns.length === 2, tabBtns.length);
+  if (tabBtns[1]) tabBtns[1].click();
+  await sleep(150);
+  const settingsPane = panel && panel.querySelector('[data-pane="settings"]');
+  ok('切到设置页签: 设置面板可见', !!settingsPane && !settingsPane.hidden);
+  ok('设置页表单已由原 options.js 渲染',
+    !!document.getElementById('cfg-salt') && !!document.getElementById('cfg-reviewMode'));
+
+  const panelBg = getComputedStyle(panel).backgroundImage || '';
+  ok('面板样式生效 (暗色渐变背景)', /linear-gradient/.test(panelBg), panelBg.slice(0, 44));
+  const nativeBg = getComputedStyle(document.getElementById('nativebtn')).backgroundColor;
+  ok('面板 CSS 没有污染页面自己的按钮', !/88, 101, 242|#5865f2/i.test(nativeBg), nativeBg);
+
+  /* ---------- 3.1 面板 CSS 分页: 设置页不得被弹窗的 body{width:250px} 挤死 ---------- */
+  const popupPane = panel.querySelector('[data-pane="popup"]');
+  const setPane = panel.querySelector('[data-pane="settings"]');
+  const setW = setPane.getBoundingClientRect().width;
+  ok('设置页宽度 > 250px (没被弹窗 body 规则污染)', setW > 260, setW.toFixed(0) + 'px');
+  const headBtn = panel.querySelector('.moe-head .moe-x');
+  ok('外壳按钮没被 pane 的 button{width:100%} 洗掉',
+    headBtn.getBoundingClientRect().width < 60, headBtn.getBoundingClientRect().width.toFixed(0) + 'px');
+
+  /* ---------- 3. 算法往返测试 (走面板按钮, 即原 options.js 的代码) ---------- */
+  document.getElementById('test').click();
+  await sleep(1200);
+  const verdict = document.getElementById('testVerdict');
+  ok('面板「算法往返测试」出结论', !!verdict && /通过|一致/.test(verdict.textContent), verdict && verdict.textContent.slice(0, 60));
+  ok('往返测试画出了混淆版预览', !!document.querySelector('#testWrap img'));
+
+  /* ---------- 4. 上传拦截 (XHR, 挂起 → 按发送 → 换体) ---------- */
+  const pngBlob = await canvasBlob(srcCanvas, 'image/png');
+  const pngBytes = new Uint8Array(await pngBlob.arrayBuffer());
+  const cfgSaved = window.GM_getValue('moeguard.cfg', {});
+  window.GM_setValue('moeguard.cfg', Object.assign({}, cfgSaved, { enabled: true, nsfwOnly: false, salt: '', autoDecode: true }));
+  await sleep(300);
+
+  const x = new XMLHttpRequest();
+  x.open('PUT', 'https://discord-attachments-uploads-prd.storage.googleapis.com/upload/storage/v1/b/x/o?uploadType=media');
+  x.setRequestHeader('content-type', 'image/webp');
+  x.send(pngBytes.buffer);
+  await sleep(1500);
+  const heldNotSent = window.__net.requests.length === 0;
+  ok('上传被挂住 (未按发送前零流量)', heldNotSent, '已发 ' + window.__net.requests.length + ' 笔');
+
+  document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(2500);
+  const sent = window.__net.last;
+  ok('按 Enter 后放行且换了体', !!sent && !!sent.bytes && sent.bytes.length > 0,
+    sent && sent.bytes ? (pngBytes.length + 'B → ' + sent.bytes.length + 'B') : 'no-body');
+
+  let isMoeEncoded = false, rtOk = false;
+  if (sent && sent.bytes) {
+    const sBlob = new Blob([sent.bytes], { type: 'image/png' });
+    const im = await window._moeFormat.blobToImageData(sBlob);
+    const meta = window.__MoeGuardCore.detectMeta(im, '');
+    isMoeEncoded = !!meta;
+    const dec = window.__MoeGuardCore.decodeImage(im, { salt: '' });
+    rtOk = !!(dec && dec.ok && dec.width === 240 && dec.height === 180);
+  }
+  ok('上传体带 moEg/moMt 标记 (是喵图)', isMoeEncoded);
+  ok('上传体解码回原尺寸 240×180', rtOk);
+
+  /* ---------- 5. 自动解码 (从「服务器」拉回刚才那张混淆图) ---------- */
+  const encImg = await (async () => {
+    const im = await window._moeFormat.blobToImageData(pngBlob);
+    im.data = new Uint8ClampedArray(im.data);
+    const enc = window.__MoeGuardCore.encodeImage(im, { salt: '' });
+    const b = await window._moeFormat.encodedToBlob(enc, null);
+    return b;
+  })();
+  await fetch('/upload?name=moe.png', { method: 'POST', body: encImg });
+  const imgEl = document.getElementById('moeimg');
+  imgEl.src = 'https://cdn.discordapp.com/attachments/1/2/moe.png?v=' + Date.now();
+  await sleep(4000);   // 交给 content.js 自己的轮询扫描 (1200ms 一轮)
+  const diagAttrs = (function () {
+    const d = document.getElementById('__moe_diag');
+    if (!d) return 'no-diag';
+    return d.getAttributeNames().map((a) => a + '=' + d.getAttribute(a)).join(' | ').slice(0, 300);
+  })();
+  ok('消息流里的喵图被自动解码', imgEl.dataset.moeScan === 'decoded',
+    'scan=' + imgEl.dataset.moeScan + ' keys=' + Object.keys(imgEl.dataset).join(',') + ' ‖ ' + diagAttrs);
+  ok('解码后换成 blob: 原图', /^blob:/.test(String(imgEl.currentSrc || imgEl.src)), String(imgEl.currentSrc || imgEl.src).slice(0, 24));
+
+  /* ---------- 5.5 「解码本页所有图片」重扫后仍然收敛 ---------- */
+  document.getElementById('scan').click();
+  await sleep(6000);
+  ok('面板「解码本页所有图片」重扫后仍然是 decoded', imgEl.dataset.moeScan === 'decoded', 'scan=' + imgEl.dataset.moeScan);
+
+  /* ---------- 5.6 遥测面板 (验证 shim 的 moe-dbg 通道) ---------- */
+  document.getElementById('reattach').click();
+  await sleep(600);
+  const dbgTxt = (document.getElementById('dbg') || {}).textContent || '';
+  ok('遥测面板显示已替换 >= 1', /已替换: [1-9]/.test(dbgTxt), dbgTxt.split('\n')[2] || dbgTxt.slice(0, 60));
+
+  /* ---------- 6. 页内右键菜单 (用一张还没被解码的附件图) ---------- */
+  const rawImg = document.getElementById('rawimg');
+  const ctxEv = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 160 });
+  rawImg.dispatchEvent(ctxEv);
+  await sleep(200);
+  const ctxEl = document.getElementById('moe-ctxmenu');
+  ok('附件图右键弹出自己的菜单', !!ctxEl && ctxEv.defaultPrevented, ctxEl ? ctxEl.textContent.slice(0, 30) : 'none');
+
+  const shiftEv = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 160, shiftKey: true });
+  if (document.getElementById('moe-ctxmenu')) document.getElementById('moe-ctxmenu').remove();
+  rawImg.dispatchEvent(shiftEv);
+  await sleep(100);
+  ok('Shift+右键放行给 Discord 原生菜单', !shiftEv.defaultPrevented);
+
+  /* ---------- 6.1 下载必须走 GM_download (不吃用户激活限制) ---------- */
+  if (document.getElementById('moe-ctxmenu')) document.getElementById('moe-ctxmenu').remove();
+  rawImg.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 120, clientY: 160 }));
+  await sleep(150);
+  const dlItems = document.querySelectorAll('#moe-ctxmenu div');
+  if (dlItems[1]) {
+    dlItems[1].click();            // 「💾 另存此图」
+    await sleep(600);
+    const last = window.__gmDl[window.__gmDl.length - 1];
+    ok('下载走 GM_download (不靠合成点击)', !!last && /attachments/.test(last.url), last ? last.name + ' ← ' + last.url.slice(0, 34) : 'none');
+  } else ok('下载走 GM_download (不靠合成点击)', false, '菜单项数=' + dlItems.length);
+
+  /* ---------- 7. 开关写入 + 跨页不串台 (切页重读) ---------- */
+  const autoChk = document.getElementById('t-autoDecode');
+  if (autoChk) {
+    autoChk.checked = false;
+    autoChk.dispatchEvent(new Event('change'));
+    await sleep(300);
+    const saved = gmCfg();
+    ok('弹窗开关写进 GM 存储', saved.autoDecode === false, JSON.stringify(saved).slice(0, 60));
+
+    /* 从设置页看过去应该已是关的 (切页重读生效) */
+    panel.querySelector('[data-tab="settings"]').click();
+    await sleep(250);
+    ok('补丁: 切到设置页时重读了配置 (不拿旧值覆盖)',
+      document.getElementById('cfg-autoDecode').checked === false,
+      'cfg-autoDecode=' + document.getElementById('cfg-autoDecode').checked);
+    panel.querySelector('[data-tab="popup"]').click();
+    await sleep(250);
+
+    autoChk.checked = true;
+    autoChk.dispatchEvent(new Event('change'));
+    await sleep(200);
+  } else ok('弹窗开关写进 GM 存储', false, '找不到 t-autoDecode');
+
+  /* ---------- 7.1 已解码的 blob 图也能右出菜单 (data-moe-orig 回落) ---------- */
+  if (document.getElementById('moe-ctxmenu')) document.getElementById('moe-ctxmenu').remove();
+  const decEv = new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 140, clientY: 180 });
+  imgEl.dispatchEvent(decEv);
+  await sleep(200);
+  ok('补丁: 已解码(blob:)的附件图右键仍有自己的菜单',
+    !!document.getElementById('moe-ctxmenu') && decEv.defaultPrevented,
+    'moeOrig=' + String(imgEl.dataset.moeOrig || '').slice(0, 30));
+
+  /* ---------- 8. 诊断 ---------- */
+  const dbg = await new Promise((res) => {
+    try {
+      // content.js 的内部监听器只认 dispatchToContent —— 用面板按钮等价路径已覆盖,
+      // 这里直接读遥测对象
+      res(window.__moeDbgSnapshot ? window.__moeDbgSnapshot() : null);
+    } catch (e) { res(null); }
+  });
+  ok('(信息) 遥测快照', true, dbg ? JSON.stringify(dbg).slice(0, 120) : 'n/a');
+
+  /* ---------- 9. 补丁②: 预处理期 abort 不得幽灵上传 ---------- */
+  const beforeAbort = window.__net.requests.length;
+  const xa = new XMLHttpRequest();
+  xa.open('PUT', 'https://discord-attachments-uploads-prd.storage.googleapis.com/upload/storage/v1/b/x/o?uploadType=media');
+  xa.send(pngBytes.buffer);
+  xa.abort();                       // 同一 tick 内取消 (bodyToU8 还没 resolve)
+  await sleep(2500);
+  ok('补丁②: 预处理期 abort → 零流量 (不会幽灵上传)',
+    window.__net.requests.length === beforeAbort,
+    '新增 ' + (window.__net.requests.length - beforeAbort) + ' 笔');
+
+  /* ---------- 10. 补丁①: 意图早于入队 → 立即放行, 不干等 45s TTL ---------- */
+  const beforeLate = window.__net.requests.length;
+  const xb = new XMLHttpRequest();
+  xb.open('PUT', 'https://discord-attachments-uploads-prd.storage.googleapis.com/upload/storage/v1/b/x/o?uploadType=media');
+  xb.send(pngBytes.buffer);
+  // 同一 tick 就按发送: 此刻 held 还是空的, 上游会丢弃这条意图 → 只能等 45s
+  document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(3000);
+  ok('补丁①: 意图早于入队 → 3s 内已放行',
+    window.__net.requests.length > beforeLate,
+    '新增 ' + (window.__net.requests.length - beforeLate) + ' 笔');
+
+  await report();
+})();
+</script>
+</body>
+</html>

@@ -242,6 +242,10 @@ const head = `// ==UserScript==
 // @description:en Auto-obfuscate Discord image uploads (MOE v3). Only users with this script can decode.
 // @author       ztztfdsf（原扩展）· 油猴移植版
 // @license      GPL-3.0
+// @homepageURL  https://github.com/ztztfdsf/dis-Plus-max
+// @supportURL   https://github.com/ztztfdsf/dis-Plus-max/issues
+// @updateURL    https://github.com/ztztfdsf/dis-Plus-max/releases/latest/download/moeguard.user.js
+// @downloadURL  https://github.com/ztztfdsf/dis-Plus-max/releases/latest/download/moeguard.user.js
 // @match        https://discord.com/*
 // @run-at       document-start
 // @sandbox      raw

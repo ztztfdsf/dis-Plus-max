@@ -14,6 +14,11 @@
 2. 新建脚本 → 全选删掉 → 粘贴 `dist/moeguard.user.js` 全文 → 保存
    （或把 `.user.js` 直接拖进浏览器窗口）
 3. **刷新 Discord 页面**（必须）
+
+> ♻️ **自动更新已开**：脚本头带 `@updateURL` / `@downloadURL`，都指向
+> `releases/latest/download/moeguard.user.js` —— 以后发新版，Tampermonkey 会自己比对版本号
+> 并提示升级（本版号固定与 `manifest.json` 同步为 **3.7.11**，发版时由 `build-user.js` 写入，
+> 不存在两边对不上的情况）。手动查更新：Tampermonkey 面板 → 已安装脚本 → MoeGuard 卡片 →「检查更新」。
 4. 入口：
    - `Alt + M` 打开面板（弹窗 / 设置两个页签）
    - 或点 Tampermonkey 图标 →「🌸 MoeGuard 面板」
@@ -38,7 +43,7 @@
 | 设置页 / 弹窗 | 扩展弹窗 + 独立设置页 | **页内浮层**（`Alt+M`），原 HTML/JS 原样搬进去 |
 | 右键「解码此图片」 | 原生 contextMenus | **页内菜单**：附件图上右键；`Shift+右键` = Discord 原生菜单 |
 | 多文件构建 → 三浏览器 zip | `build.js` | `build-user.js` → 单个 `.user.js` |
-| 自动更新 | 扩展商店 / 手动 | 需自行加 `@updateURL` / `@downloadURL` |
+| 自动更新 | 扩展商店 / 手动 | ✅ 已内置 `@updateURL` / `@downloadURL`（指向 `releases/latest`，版本号随 `manifest.json`） |
 | 安卓 GeckoView（`sendNativeMessage` 下载、emoji 字体兜底） | ✅ | ❌ 无（桌面用不到） |
 | 动态域名授权 `optional_host_permissions` | ✅ | 改成静态 `@connect`（含 `*`，安装时一次性授权） |
 

@@ -1860,6 +1860,55 @@
   function emojiCdnUrl(id, animated) {
     return 'https://cdn.discordapp.com/emojis/' + id + (animated ? '.gif' : '.webp') + '?size=96';
   }
+  /* 【发出去只要一个字】裸 CDN 链接 60+ 字, 消息栏里一大串噪声。
+   * Discord 的 markdown 链接可以把 URL 藏到一个点后面: `[. ](url)`
+   * —— 文字只占一个字, 图仍照常展开 (官方只把「尖括号 <url>」当作屏蔽预览的写法,
+   * 链文字不影响 embed 抽取)。 */
+  function linkText(url) {
+    return '[. ](' + url + ')';
+  }
+
+  /* ---------- 接手后把表情面板关掉 (跟 Discord 原生一致) ----------
+   * 原生 emoji 按钮的 onClick 最后一段是
+   *   c(t, { isFinalSelection: !e.shiftKey, toggleFavorite: n })
+   * —— 不按 Shift 就是「最终选择」, Discord 自己收面板。而我们在 document
+   * 捕获阶段就 preventDefault + stopPropagation, 那条 handler 根本没跑,
+   * 面板就赖在那儿不动 (主人报的问题)。
+   *
+   * 三档做法, 从最像人到最兼容:
+   *   ① 给 popout 的 clickTrap 派发一套 pointer/mouse 序列 = 「点了面板外面」。
+   *      2026-11 实页实测: 面板关闭, 输入框草稿 124 字符前后一字未动。
+   *      派发在 trap 自己身上而不是面板里 —— 事件只向上冒泡,
+   *      面板内部的 handler 收不到, 不会误触发选中/悬停。
+   *   ② 再点一次表情按钮 (开关式) —— 类名被 Discord 改了也能用。
+   *   ③ Escape —— 最后一道; 副作用是它还会顺手取消「回复」, 所以只当前两项都找不到。
+   * Shift 按住时不关, 跟原生一样留着连续挑。 */
+  function mouseSeq(el) {
+    const mk = (Ctor, type, extra) => {
+      if (!Ctor) return null;
+      try { return new Ctor(type, Object.assign({ bubbles: true, cancelable: true, view: window, button: 0, clientX: 4, clientY: 4 }, extra || {})); }
+      catch (e) { return null; }
+    };
+    const evs = [
+      mk(window.PointerEvent, 'pointerdown', { pointerId: 1, pointerType: 'mouse' }),
+      mk(window.MouseEvent, 'mousedown'),
+      mk(window.PointerEvent, 'pointerup', { pointerId: 1, pointerType: 'mouse' }),
+      mk(window.MouseEvent, 'mouseup'),
+      mk(window.MouseEvent, 'click'),
+    ];
+    for (const ev of evs) { if (ev) { try { el.dispatchEvent(ev); } catch (e) {} } }
+  }
+  function closeExpressionPicker() {
+    try {
+      const trap = document.querySelector('[class*="trapClicks"], [class*="clickTrapContainer"]');
+      if (trap) { mouseSeq(trap); stamp('picker', 'trap'); return; }
+      const trg = document.querySelector('[aria-label*="表情符号"], [id^="emoji-button"]');
+      if (trg) { try { trg.click(); } catch (e) {} stamp('picker', 'trigger'); return; }
+      const a = document.activeElement || document.body;
+      a.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true }));
+      stamp('picker', 'esc');
+    } catch (e) { stamp('picker', 'err:' + String((e && e.message) || e).slice(0, 40)); }
+  }
   /** 表情格子 → 真正带 data-id / data-animated 的那个宿主元素
    * 劫持与打标必须用同一个宿主, 否则标记写在 A 上、点击时查 B 就白写了。 */
   function emojiHost(item) {
@@ -1935,7 +1984,8 @@
           e.preventDefault();
           e.stopPropagation();
           stamp('hijack', 'emoji:take' + (animated ? ':gif' : ''));
-          insertIntoComposer(emojiCdnUrl(id, animated) + ' ').catch(() => {});   // 不弹 toast (主人要求)
+          insertIntoComposer(linkText(emojiCdnUrl(id, animated)) + ' ').catch(() => {});   // 不弹 toast (主人要求)
+          if (!e.shiftKey) closeExpressionPicker();   // Shift 连着挑 → 留着面板
         } catch (err) {}
       }, true);
     } catch (e) {}
@@ -1995,7 +2045,8 @@
           e.preventDefault();
           e.stopPropagation();
           stamp('hijack', 'sticker:take:' + fmt);
-          insertIntoComposer(url + ' ').catch(() => {});
+          insertIntoComposer(linkText(url) + ' ').catch(() => {});
+          if (!e.shiftKey) closeExpressionPicker();
         } catch (err) {}
       }, true);
     } catch (e) {}

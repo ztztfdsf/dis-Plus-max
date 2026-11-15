@@ -7,6 +7,51 @@ Firefox 用非持久 event page），油猴版则是同一份内核换成 `GM_*`
 
 ---
 
+## v3.7.12 — 2026-11-16
+
+### 🐛 表情/贴纸解锁的两处体验修正
+
+**一、接手后表情面板不再赖在那儿**
+
+点被锁的动图/外服表情，原生行为是「插进输入框 + 面板自动收起」，我们接手后只有前半条。
+根因（面板 DOM 一手证据）：Discord 自己的 `onClick` 末尾是
+
+```js
+c(t, { isFinalSelection: !e.shiftKey, toggleFavorite: n })
+```
+
+——不按 Shift 就是「最终选择」，它自己收面板。而我们在 `document` 捕获阶段就
+`stopPropagation`，那条 handler 根本没跑到。
+
+修法：三档，从最像人到最兼容 ——
+① 给 popout 的 `clickTrap` 派发一套 pointer/mouse 序列（= 「点了面板外面」；
+   事件只向上冒泡，面板内部收不到，不会误触发选中）
+② 再点一次表情按钮（开关式，不依赖 class 名）
+③ Escape（最后一道，副作用是会顺手取消「回复」，所以只当前两项都找不到）
+
+按住 Shift 时不关 —— 跟原生一样留着连续挑。
+实页实测：面板关闭、输入框草稿 124 字符前后**一字未动**；贴纸面板用的是同一个
+`trapClicks` 容器，25 张贴纸实测同样能关。
+
+**二、发出去的文本从一个 URL 缩短成一个字**
+
+以前插的是裸 CDN 地址（60+ 字），消息里一大串噪声。现在插
+`[. ](https://cdn.discordapp.com/emojis/…)` —— 链文字只占一个字。
+
+【关键：图照旧出】这不是推演，是实页开火量的：同一个表情（`ob_fat`，gif）在安静频道
+连发两条对照，两条的服务端 embed 完全一致：
+
+| 形式 | embed 节点 | 渲染 | 2.5s 后复查 |
+|---|---|---|---|
+| 裸 `https://…/emojis/<id>.gif?size=96` | 2（`inlineMediaEmbed` + `imageContent`） | 96×96 图 | 仍是 2 |
+| `[. ](https://…/emojis/<id>.gif?size=96)` | 2（`inlineMediaEmbed` + `imageContent`） | 96×96 图 | 仍是 2 |
+
+屏蔽预览的写法是尖括号 `<url>`，链文字不影响 embed 抽取 —— 这一条已推翻「裹上 markdown 就不出图」的担心。
+
+（油猴版与扩展版同源，两边一起生效。）
+
+---
+
 ## v3.7.11 — 2026-11-10（新增第 4 个包：油猴单文件版）
 
 ### 🐵 油猴版（`moeguard.user.js`）

@@ -21,6 +21,15 @@
   </ul>
   <div id="composer" role="textbox" class="slateTextArea" contenteditable="true">hello</div>
   <button id="nativebtn">Discord 自己的按钮</button>
+
+  <!-- 仿真表情面板: Discord 2026 把面板挂在 clickTrap 里, 点在面板外 = 关面板 -->
+  <button id="emoji-trigger" aria-label="添加表情符号">😊</button>
+  <div id="picker-trap" class="clickTrapContainer_aaa trapClicks_bbb" style="display:none">
+    <div class="emojiPicker_ccc">
+      <button id="lk1" data-type="emoji" data-id="1571550119483150561" data-animated="true" data-name="naijing_gif"><span class="emojiLockIcon_zzz"></span></button>
+      <button id="fr1" data-type="emoji" data-id="1571549979754111046" data-animated="false" data-name="naijing">🙂</button>
+    </div>
+  </div>
 </main>
 
 <script>
@@ -334,6 +343,44 @@
   ok('补丁①: 意图早于入队 → 3s 内已放行',
     window.__net.requests.length > beforeLate,
     '新增 ' + (window.__net.requests.length - beforeLate) + ' 笔');
+
+  /* ---------- 11. 表情面板: 接手后关面板 + 发短链接 ---------- */
+  const trap = document.getElementById('picker-trap');
+  const trg = document.getElementById('emoji-trigger');
+  const lk1 = document.getElementById('lk1');
+  const fr1 = document.getElementById('fr1');
+  const cbox = document.getElementById('composer');
+  const pickerOpen = () => trap.style.display !== 'none';
+  trg.addEventListener('click', () => { trap.style.display = pickerOpen() ? 'none' : ''; });
+  /* Discord 的 clickTrap: 点在面板外 → 关 */
+  trap.addEventListener('mousedown', (e) => { if (e.target === trap) trap.style.display = 'none'; });
+
+  cbox.focus();
+  trap.style.display = '';
+  lk1.click();
+  await sleep(500);
+  const cTxt = cbox.textContent;
+  ok('被锁动图 → 插 [. ](短链接) 而不是裸 URL',
+    /\[\. \]\(https:\/\/cdn\.discordapp\.com\/emojis\/1571550119483150561\.gif\?size=96\)/.test(cTxt),
+    cTxt.slice(-70));
+  ok('接手后表情面板自动关闭 (与原生一致)', !pickerOpen(), 'open=' + pickerOpen());
+
+  /* Shift 连着挑 → 面板留着 */
+  trap.style.display = '';
+  cbox.focus();
+  lk1.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: true }));
+  await sleep(500);
+  ok('Shift+点 → 面板不关 (跟原生一样留着连续挑)', pickerOpen(), 'open=' + pickerOpen());
+  trap.style.display = 'none';
+
+  /* 没锁的表情 → 完全不接手, 交回 Discord 原生 */
+  const before2 = cbox.textContent;
+  trap.style.display = '';
+  cbox.focus();
+  fr1.click();
+  await sleep(500);
+  ok('没锁的表情不接手 (不插链接也不关面板)', cbox.textContent === before2,
+    (cbox.textContent === before2 ? 'ok' : cbox.textContent.slice(-50)) + ' hijack=' + (document.getElementById('__moe_diag') || { dataset: {} }).dataset.hijack);
 
   await report();
 })();

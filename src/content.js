@@ -1928,6 +1928,7 @@
 
     input.dispatchEvent(new IE('beforeinput', pageInit({ bubbles: true, cancelable: true, inputType: 'deleteContentBackward' })));
     await tick();
+    /* chip 还在 = 没删掉 —— 绝不能继续贴, 否则就是在错误位置插文本 */
     if (chip.isConnected) { stamp('emo', 'del-fail'); return false; }
 
     const pe = new CE('paste', pageInit({ bubbles: true, cancelable: true }));
@@ -1939,24 +1940,45 @@
     return ok;
   }
 
-  /** 输入栏里扫一遍: 命中 broken 名单的 chip 就地换成短链 */
-  function convertBrokenEmojiChips() {
+  /** 下一个要接手的 chip: 命中 broken 名单、不在 good 名单、还没试过的第一个 */
+  function findNextBrokenChip() {
+    const chips = document.querySelectorAll(
+      '[contenteditable="true"] img[data-type="emoji"][data-id], [class*="slateTextArea"] img.emoji[data-id]');
+    for (const chip of chips) {
+      const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
+      if (!m) continue;
+      if (emoGood[m[1]] || !emoBroken[m[1]]) continue;          // 可用/未知的 → 不碰
+      if (chip.getAttribute('data-moe-emo') === 'done') continue;
+      if (!chipEmojiUrl(chip)) continue;
+      return chip;
+    }
+    return null;
+  }
+
+  /** 输入栏里逐个换: 一次只动一张 chip, 换完重新查 DOM。
+   * 【为何不能一次批量换完】React/Slate 一改内容就重绘整段,
+   *   手里拿着的后面几个 chip 引用当场作废 —— 轻则没换到,
+   *   重则在错位置插一发。串行 + 每轮重查 + emoBusy 防重入, 多张叠着也对。
+   * 【为何是就地】光标放在 chip 后面删 → 选区停在删除点 → 贴回去就在原位,
+   *   输入栏里其他文字与其他表情一律不动。 */
+  let emoBusy = false;
+  async function convertBrokenEmojiChips() {
+    if (emoBusy) return;
+    emoBusy = true;
     try {
-      const chips = document.querySelectorAll(
-        '[contenteditable="true"] img[data-type="emoji"][data-id], [class*="slateTextArea"] img.emoji[data-id]');
-      for (const chip of chips) {
-        const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
-        if (!m) continue;
-        if (emoGood[m[1]] || !emoBroken[m[1]]) continue;
-        if (chip.getAttribute('data-moe-emo') === 'done') continue;
+      for (let guard = 0; guard < 8; guard++) {
+        const chip = findNextBrokenChip();
+        if (!chip) break;
+        chip.setAttribute('data-moe-emo', 'done');       // 先标记再动手, 不会形循环
         const url = chipEmojiUrl(chip);
-        if (!url) continue;
-        chip.setAttribute('data-moe-emo', 'done');      // 重试也只一次, 不会形循环
-        const nm = m[1];
-        replaceChipWithText(chip, linkText(url) + ' ').then((ok) => { if (!ok) chip.removeAttribute('data-moe-emo'); });
-        stamp('emo', 'take:' + nm);
+        const name = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim())[1];
+        const ok = await replaceChipWithText(chip, linkText(url) + ' ');
+        if (ok) stamp('emo', 'ok:' + name);
+        else { chip.removeAttribute('data-moe-emo'); break; }   // 失败就收手, 下一轮再说
+        await tick();                                     // 等 Slate 重绘完再找下一张
       }
-    } catch (e) {}
+    } catch (e) { stamp('emo', 'err:' + String((e && e.message) || e).slice(0, 40)); }
+    emoBusy = false;
   }
 
   /* ---------- 点击劫持: 被锁的表情改成插入 CDN 图链接 ----------

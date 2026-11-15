@@ -22,6 +22,7 @@
   <div id="composer" role="textbox" class="slateTextArea" contenteditable="true">hello</div>
   <!-- 外服表情判据源: 一条渲染成字面文本 (不可用), 一条渲染成图 (可用) -->
   <div class="messageContent_harness" id="litbox"><span>:bad_emote:</span></div>
+  <div class="messageContent_harness" id="litbox2"><span>:bad_emote2:</span></div>
   <div class="messageContent_harness" id="goodbox"><img class="emoji" data-type="emoji" data-id="999000" alt=":good_emote:" src="https://cdn.discordapp.com/emojis/999000.webp?size=44"></div>
   <button id="nativebtn">Discord 自己的按钮</button>
 
@@ -427,6 +428,8 @@
     JSON.stringify((ui12.emo || {}).good));
 
   const cbox2 = document.getElementById('composer');
+  cbox2.innerHTML = '';
+  const put = (s) => cbox2.appendChild(document.createTextNode(s));
   const mkChip = (id, name) => {
     const im = document.createElement('img');
     im.className = 'emoji';
@@ -437,17 +440,26 @@
     cbox2.appendChild(im);
     return im;
   };
-  const badChip = mkChip('1397468110776172654', 'bad_emote');
-  const goodChip = mkChip('999000', 'good_emote');
+  /* 文字 + 不可用 + 文字 + 可用 + 文字 + 不可用 + 文字 —— 多张叠着也要各自就位 */
+  put('甲'); const badChip = mkChip('1397468110776172654', 'bad_emote');
+  put('乙'); const goodChip = mkChip('999000', 'good_emote');
+  put('丙'); const badChip2 = mkChip('1397468110776172655', 'bad_emote2');
+  put('丁');
   cbox2.focus();
-  await sleep(2600);                       // 等一轮 loop (1.2s)
-  ok('不可用的表情 chip 被从输入栏里拿掉', !badChip.isConnected, '还在=' + badChip.isConnected);
+  await sleep(5000);                       // 等 loop 跑几轮 (每轮串行换一张)
   const txt12 = cbox2.textContent;
-  ok('换成 [. ](它自己的 URL?size=96)',
-    /\[\. \]\(https:\/\/cdn\.discordapp\.com\/emojis\/1397468110776172654\.webp\?size=96\)/.test(txt12),
-    txt12.slice(0, 90));
-  ok('可用的表情 chip 原样留着 (没误伤)', document.getElementById('composer').contains(goodChip),
-    'good 还在=' + document.getElementById('composer').contains(goodChip));
+  ok('两张不可用的 chip 都被拿掉 (多张叠加也正常)',
+    !badChip.isConnected && !badChip2.isConnected,
+    'b1=' + badChip.isConnected + ' b2=' + badChip2.isConnected);
+  ok('可用的那张原样留着 (没误伤)', cbox2.contains(goodChip), 'good 还在=' + cbox2.contains(goodChip));
+  const L1 = '[. ](https://cdn.discordapp.com/emojis/1397468110776172654.webp?size=96)';
+  const L2 = '[. ](https://cdn.discordapp.com/emojis/1397468110776172655.webp?size=96)';
+  ok('第一张换在自己的位置上',
+    txt12.indexOf('甲') >= 0 && txt12.indexOf(L1) > txt12.indexOf('甲') && txt12.indexOf('乙') > txt12.indexOf(L1),
+    txt12);
+  ok('第二张换在自己的位置上',
+    txt12.indexOf(L2) > txt12.indexOf('乙') && txt12.indexOf('丁') > txt12.indexOf(L2), txt12);
+  ok('原有文字没被整体覆盖', ['甲', '乙', '丙', '丁'].every((x) => txt12.indexOf(x) >= 0), txt12);
 
   await report();
 })();

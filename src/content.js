@@ -1904,10 +1904,39 @@
   /* 【选 chip 本身不行 —— 实页实测三条插入通道全 all-failed】
    * Discord 的表情 chip 包在 `<span data-slate-void="true" contenteditable="false">` 里,
    * 选中一个不可编辑子树里的节点, Slate 根本不认这个选区。
-   * 真止的做法 (2026-11-16 实页一发即中):
-   *   ① 光标放到 chip 后面 (collapsed)
-   *   ② beforeinput: deleteContentBackward —— 就是用户自己按退格那条路
-   *   ③ 选区停在删除点, 发 paste 把短链贴回去 (跟原生插入口同一个通道) */
+   *
+   * 【先删后贴也不得 —— 2026-11-16 实页另一起】data-emo=paste-fail:
+   *   chip 删掉了, 贴回却失败 → 用户的表情直接丢了。删了就不能反悔。
+   *
+   * 【改成先贴后删, 贴不上就不动】
+   *   ① 光标放在 chip 后面 (collapsed) → paste 把短链贴上去 (就在 chip 后面)
+   *   ② 确认文本真的落下来了 —— 没落下就直接 return, chip 一根毛都不碰
+   *   ③ 重新查那张 chip (React 可能换了节点), 光标放到它后面
+   *     → beforeinput deleteContentBackward (跟用户自己按退格同一条路)
+   *   结粠看: 文本在 chip 原位, chip 被退格掉 = 等价于就地替换。 */
+  function placeCaretAfter(node) {
+    const sel = window.getSelection && window.getSelection();
+    if (!sel || !node || !node.parentNode) return false;
+    const rg = document.createRange();
+    rg.setStartAfter(node);
+    rg.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(rg);
+    return true;
+  }
+
+  /** 重画后重新找那张 chip (同一 data-id + 同一 alt, 并且不是刚贴进去的文本) */
+  function findChipAgain(chip) {
+    const id = chip.getAttribute('data-id');
+    const alt = chip.getAttribute('alt');
+    const input = composerEl();
+    if (!input || !id) return null;
+    for (const el of input.querySelectorAll('img[data-type="emoji"]')) {
+      if (el.getAttribute('data-id') === id && el.getAttribute('alt') === alt) return el;
+    }
+    return null;
+  }
+
   async function replaceChipWithText(chip, text) {
     const input = composerEl();
     if (!input || !chip) return false;
@@ -1917,27 +1946,30 @@
     const CE = pageCtor('ClipboardEvent');
     const dt = pageDataTransfer(text);
     if (!IE || !CE || !dt) return false;
-    const sel = window.getSelection && window.getSelection();
-    if (!sel) return false;
+    const want = String(text).trim();
     try { input.focus(); } catch (e) {}
-    const rg = document.createRange();
-    rg.setStartAfter(anchor);
-    rg.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(rg);
 
-    input.dispatchEvent(new IE('beforeinput', pageInit({ bubbles: true, cancelable: true, inputType: 'deleteContentBackward' })));
-    await tick();
-    /* chip 还在 = 没删掉 —— 绝不能继续贴, 否则就是在错误位置插文本 */
-    if (chip.isConnected) { stamp('emo', 'del-fail'); return false; }
-
+    /* ① 先贴 */
+    if (!placeCaretAfter(anchor)) { stamp('emo', 'no-caret'); return false; }
     const pe = new CE('paste', pageInit({ bubbles: true, cancelable: true }));
     try { Object.defineProperty(pe, 'clipboardData', { value: dt, configurable: true }); } catch (e) {}
     input.dispatchEvent(pe);
     await tick();
-    const ok = String(input.textContent || '').indexOf(text.trim()) >= 0;
-    stamp('emo', ok ? 'ok' : 'paste-fail');
-    return ok;
+    /* ② 没贴上去就收手 —— 绝不能先删 */
+    if (String(input.textContent || '').indexOf(want) < 0) { stamp('emo', 'paste-fail'); return false; }
+
+    /* ③ 再退格掉 chip */
+    const again = chip.isConnected ? chip : findChipAgain(chip);
+    if (again) {
+      const wrap2 = (again.closest && again.closest('[data-slate-void="true"]')) || again;
+      if (placeCaretAfter(wrap2)) {
+        input.dispatchEvent(new IE('beforeinput', pageInit({ bubbles: true, cancelable: true, inputType: 'deleteContentBackward' })));
+        await tick();
+      }
+      if (again.isConnected) { stamp('emo', 'del-fail(文本已贴, 保留原 chip)'); return false; }
+    }
+    stamp('emo', 'ok');
+    return true;
   }
 
   /** 下一个要接手的 chip: 命中 broken 名单、不在 good 名单、还没试过的第一个 */

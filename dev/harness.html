@@ -461,6 +461,16 @@
     txt12.indexOf(L2) > txt12.indexOf('乙') && txt12.indexOf('丁') > txt12.indexOf(L2), txt12);
   ok('原有文字没被整体覆盖', ['甲', '乙', '丙', '丁'].every((x) => txt12.indexOf(x) >= 0), txt12);
 
+  /* 防刷屏: 再插一张同一个表情 → 应该只多一个链接, 不能每 1.2s 重贴一次 */
+  const cnt = (s, sub) => s.split(sub).length - 1;
+  put('戊'); const again3 = mkChip('1397468110776172654', 'bad_emote');
+  cbox2.focus();
+  await sleep(4000);
+  const txt13 = cbox2.textContent;
+  ok('同一表情再插一次只多一个链接 (不会每轮重贴刷屏)',
+    cnt(txt13, L1) === 2 && !again3.isConnected,
+    'L1 个数=' + cnt(txt13, L1) + ' chip 还在=' + again3.isConnected);
+
   await report();
 })();
 </script>

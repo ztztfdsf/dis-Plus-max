@@ -1865,6 +1865,9 @@
   const EMO_NAME = /^:([a-zA-Z0-9_]{2,64}):$/;
   const emoGood = Object.create(null);      // 名字 → 渲染成过图 (可用)
   const emoBroken = Object.create(null);    // 名字 → 渲染成过字面文本 (不可用)
+  /* 名字 → 尝试失败次数。上限 2 次就不再试: paste 有可能实际已落文本但校验没对上,
+   * 每 1.2s 重贴一次会变成 `[. ](url) [. ](url) …` 满屏——宁可不换也不能贴一串。 */
+  const emoTried = Object.create(null);
   let emoTick = 0;
 
   /** 从已渲染的消息里学「这个表情名对我们能不能解析」 */
@@ -1979,9 +1982,12 @@
     for (const chip of chips) {
       const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
       if (!m) continue;
-      if (emoGood[m[1]] || !emoBroken[m[1]]) continue;          // 可用/未知的 → 不碰
-      if (chip.getAttribute('data-moe-emo') === 'done') continue;
+      const name = m[1];
+      if (emoGood[name] || !emoBroken[name]) continue;              // 可用/未知的 → 不碰
+      if (emoTried[name] >= 2) { chip.setAttribute('data-moe-emo', 'skip'); continue; }
+      if (chip.getAttribute('data-moe-emo')) continue;              // 试过 / 已放弃
       if (!chipEmojiUrl(chip)) continue;
+      chip.setAttribute('data-moe-emo', 'done');                    // 先标记再动手, 不会形循环
       return chip;
     }
     return null;
@@ -2001,12 +2007,16 @@
       for (let guard = 0; guard < 8; guard++) {
         const chip = findNextBrokenChip();
         if (!chip) break;
-        chip.setAttribute('data-moe-emo', 'done');       // 先标记再动手, 不会形循环
         const url = chipEmojiUrl(chip);
         const name = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim())[1];
         const ok = await replaceChipWithText(chip, linkText(url) + ' ');
-        if (ok) stamp('emo', 'ok:' + name);
-        else { chip.removeAttribute('data-moe-emo'); break; }   // 失败就收手, 下一轮再说
+        if (ok) { emoTried[name] = 0; chip.removeAttribute('data-moe-emo'); stamp('emo', 'ok:' + name); }
+        else {
+          emoTried[name] = (emoTried[name] || 0) + 1;
+          chip.setAttribute('data-moe-emo', 'fail' + emoTried[name]);
+          stamp('emo', 'retry:' + name + '#' + emoTried[name]);
+          break;                                          // 这轮收手, 下一轮再试
+        }
         await tick();                                     // 等 Slate 重绘完再找下一张
       }
     } catch (e) { stamp('emo', 'err:' + String((e && e.message) || e).slice(0, 40)); }

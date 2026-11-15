@@ -20,6 +20,9 @@
     <li><img id="rawimg" width="320" alt="右键菜单目标" src="https://cdn.discordapp.com/attachments/1/2/notfound.png"></li>
   </ul>
   <div id="composer" role="textbox" class="slateTextArea" contenteditable="true">hello</div>
+  <!-- 外服表情判据源: 一条渲染成字面文本 (不可用), 一条渲染成图 (可用) -->
+  <div class="messageContent_harness" id="litbox"><span>:bad_emote:</span></div>
+  <div class="messageContent_harness" id="goodbox"><img class="emoji" data-type="emoji" data-id="999000" alt=":good_emote:" src="https://cdn.discordapp.com/emojis/999000.webp?size=44"></div>
   <button id="nativebtn">Discord 自己的按钮</button>
 
   <!-- 仿真表情面板: Discord 2026 把面板挂在 clickTrap 里, 点在面板外 = 关面板 -->
@@ -111,6 +114,37 @@
  * 结果 POST 回 run.js 打印。
  * ══════════════════════════════════════════════════════════════════ */
 (async function () {
+  /* ---------- 仿真 Discord 的 Slate 编辑行为 ----------
+   * 真页上表情 chip 包在 <span data-slate-void="true" contenteditable="false"> 里,
+   * Slate 自己听 beforeinput / paste。仿真台不照做这两件事,
+   * 「输入栏里把 chip 换成短链」这条用例就是测空气。 */
+  (function emulateSlate() {
+    const box = document.getElementById('composer');
+    if (!box) return;
+    box.addEventListener('beforeinput', (e) => {
+      if (e.inputType !== 'deleteContentBackward') return;
+      e.preventDefault();
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount) return;
+      const rg0 = sel.getRangeAt(0);
+      if (!rg0.collapsed) { rg0.deleteContents(); return; }
+      const n = rg0.startContainer, off = rg0.startOffset;
+      if (n.nodeType === 1) { const v = n.childNodes[off - 1]; if (v) v.remove(); return; }
+      if (off > 0) n.textContent = n.textContent.slice(0, off - 1) + n.textContent.slice(off);
+    });
+    box.addEventListener('paste', (e) => {
+      const t = e.clipboardData ? e.clipboardData.getData('text/plain') : null;
+      if (t == null) return;
+      e.preventDefault();
+      const sel = window.getSelection();
+      let rg = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+      if (rg && !box.contains(rg.startContainer)) rg = null;    // 选区跑外面 → 当末尾插
+      const node = document.createTextNode(t);
+      if (rg) { rg.deleteContents(); rg.insertNode(node); rg.setStartAfter(node); rg.collapse(true); sel.removeAllRanges(); sel.addRange(rg); }
+      else box.appendChild(node);
+    });
+  })();
+
   window.addEventListener('error', (e) => {
     try { fetch('/log', { method: 'POST', body: 'ERR ' + (e.message || '') + ' @' + (e.filename || '') + ':' + (e.lineno || 0) }); } catch (er) {}
   });
@@ -381,6 +415,39 @@
   await sleep(500);
   ok('没锁的表情不接手 (不插链接也不关面板)', cbox.textContent === before2,
     (cbox.textContent === before2 ? 'ok' : cbox.textContent.slice(-50)) + ' hijack=' + (document.getElementById('__moe_diag') || { dataset: {} }).dataset.hijack);
+
+  /* ---------- 12. 外服表情: 输入栏里的 chip 就地换成短链 ---------- */
+  const ui12 = window.__MoeUI || {};
+  if (ui12.scanEmojiRender) ui12.scanEmojiRender();     // 先消除时序抖动
+  ok('学到「渲染成字面文本」的表情名 → broken 名单',
+    (ui12.emo || { broken: [] }).broken.indexOf('bad_emote') >= 0,
+    JSON.stringify((ui12.emo || {}).broken));
+  ok('学到「渲染成图」的表情名 → good 名单 (永不接手)',
+    (ui12.emo || { good: [] }).good.indexOf('good_emote') >= 0,
+    JSON.stringify((ui12.emo || {}).good));
+
+  const cbox2 = document.getElementById('composer');
+  const mkChip = (id, name) => {
+    const im = document.createElement('img');
+    im.className = 'emoji';
+    im.setAttribute('data-type', 'emoji');
+    im.setAttribute('data-id', id);
+    im.setAttribute('alt', ':' + name + ':');
+    im.src = 'https://cdn.discordapp.com/emojis/' + id + '.webp?size=44';
+    cbox2.appendChild(im);
+    return im;
+  };
+  const badChip = mkChip('1397468110776172654', 'bad_emote');
+  const goodChip = mkChip('999000', 'good_emote');
+  cbox2.focus();
+  await sleep(2600);                       // 等一轮 loop (1.2s)
+  ok('不可用的表情 chip 被从输入栏里拿掉', !badChip.isConnected, '还在=' + badChip.isConnected);
+  const txt12 = cbox2.textContent;
+  ok('换成 [. ](它自己的 URL?size=96)',
+    /\[\. \]\(https:\/\/cdn\.discordapp\.com\/emojis\/1397468110776172654\.webp\?size=96\)/.test(txt12),
+    txt12.slice(0, 90));
+  ok('可用的表情 chip 原样留着 (没误伤)', document.getElementById('composer').contains(goodChip),
+    'good 还在=' + document.getElementById('composer').contains(goodChip));
 
   await report();
 })();

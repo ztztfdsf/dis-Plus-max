@@ -1039,9 +1039,10 @@
         return true;
       }
     });
-  } else {
-    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, get decisions() { return decisions.slice(); }, get cfg() { return cfg; } };
   }
+  /* 调试/仿真入口。v3.7.12 之前只挂在非扩展分支上 —— 带 shim 的形态里
+   * EXT 为真, 仿真台/面板就什都拿不到, 提到分支外两种形态都有。 */
+  window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, scanEmojiRender, convertBrokenEmojiChips, get decisions() { return decisions.slice(); }, get cfg() { return cfg; }, get emo() { return { good: Object.keys(emoGood), broken: Object.keys(emoBroken) }; } };
 
   /* ---------- 移除举报入口 (主人要求: 整个 Discord 界面去掉举报) ---------- */
   const REPORT_KEYWORDS = ['report', '举报', '報告', '申告'];
@@ -1842,6 +1843,122 @@
     return false;
   }
 
+  /* ---------- 外服表情: 还在输入栏里就就地换成短链图 ----------
+   * 【现象】用了你不在的服务器的表情 (非伙伴/认证服), 输入栏里能正常渲染成图,
+   *   但 Discord 照样把 <:name:id> 发出去, 接收端 (连自己) 只看到一串字面字符。
+   * 【一手证据 2026-11-16 实页】
+   *   发送 body: {"content":"<:rin_miao_full_angry:1397468110776172654>"}
+   *   渲染结果: <span>:rin_miao_full_angry:</span>   ← 没图
+   *   同期另两条外服表情渲染成 img.emoji; 三条的 CDN 全是 HTTP 200
+   *   → 差异不在图在不在, 而在【我们自己的客户端能不能解析它】—— 这就是判据。
+   * 【两个名单, 都从已渲染的消息里学, 零猜测】
+   *   good   : 某个表情名在消息里渲染成 <img> → 可用, 永远不碰
+   *   broken : 某个表情名在消息里渲染成字面 :name: 文本 → 对我们不可用
+   *   输入栏里出现 broken 名单上的 chip (Discord 的 chip 自带 data-id 与
+   *   alt=":name:", URL 就是它自己的 src) → 选中它, 换成 `[. ](那个 URL)`。
+   *   发送时文本已经是链接; [. ](URL) 与裸 URL 的服务端 embed 实测一致。
+   * 【为什么不在发送时刻改 body】那样你根本看不见换了什么。现在你在输入栏里
+   *   就能看到一个点 + 图照旧出。
+   * 【已知局限】一个表情第一次用 (滚动条里从没见过它的字面渲染) 时判不出来,
+   *   那条依旧原样发; 但它当场就在滚动条里留下字面文本, 从下一个起自动转链。
+   */
+  const EMO_NAME = /^:([a-zA-Z0-9_]{2,64}):$/;
+  const emoGood = Object.create(null);      // 名字 → 渲染成过图 (可用)
+  const emoBroken = Object.create(null);    // 名字 → 渲染成过字面文本 (不可用)
+  let emoTick = 0;
+
+  /** 从已渲染的消息里学「这个表情名对我们能不能解析」 */
+  function scanEmojiRender() {
+    try {
+      const boxes = document.querySelectorAll('[class*="messageContent_"]');
+      const from = Math.max(0, boxes.length - 80);      // 只看最近 80 条, 成本可控
+      for (let i = from; i < boxes.length; i++) {
+        const box = boxes[i];
+        /* 渲染成图 → 可用 */
+        const imgs = box.querySelectorAll('img.emoji, img[data-type="emoji"]');
+        for (const im of imgs) {
+          const m = EMO_NAME.exec(String(im.getAttribute('alt') || '').trim());
+          if (m) emoGood[m[1]] = 1;
+        }
+        /* 直接子 span 的纯文本就是 :name: → 我们解析不了 */
+        for (const sp of box.children) {
+          if (!sp || sp.tagName !== 'SPAN') continue;
+          if (sp.querySelector && sp.querySelector('img')) continue;
+          const m = EMO_NAME.exec(String(sp.textContent || '').trim());
+          if (m && !emoGood[m[1]]) emoBroken[m[1]] = Date.now();
+        }
+      }
+    } catch (e) {}
+  }
+
+  /** chip 自己的 src 就是表情图地址; 只把尺寸提一档, 扩展名保持原样
+   * (外服表情在输入栏里用的就是 .webp, 动图也是动 webp —— 不用猜 gif) */
+  function chipEmojiUrl(img) {
+    const src = String((img.getAttribute && img.getAttribute('src')) || img.src || '');
+    if (!/discordapp\.(com|net)\/emojis\//.test(src)) return null;
+    const base = src.split('?')[0];
+    if (!/\.(gif|webp|png)$/i.test(base)) return null;
+    return base + '?size=96';
+  }
+
+  /* 【选 chip 本身不行 —— 实页实测三条插入通道全 all-failed】
+   * Discord 的表情 chip 包在 `<span data-slate-void="true" contenteditable="false">` 里,
+   * 选中一个不可编辑子树里的节点, Slate 根本不认这个选区。
+   * 真止的做法 (2026-11-16 实页一发即中):
+   *   ① 光标放到 chip 后面 (collapsed)
+   *   ② beforeinput: deleteContentBackward —— 就是用户自己按退格那条路
+   *   ③ 选区停在删除点, 发 paste 把短链贴回去 (跟原生插入口同一个通道) */
+  async function replaceChipWithText(chip, text) {
+    const input = composerEl();
+    if (!input || !chip) return false;
+    const anchor = (chip.closest && chip.closest('[data-slate-void="true"]')) || chip;
+    if (!anchor.parentNode) return false;
+    const IE = pageCtor('InputEvent');
+    const CE = pageCtor('ClipboardEvent');
+    const dt = pageDataTransfer(text);
+    if (!IE || !CE || !dt) return false;
+    const sel = window.getSelection && window.getSelection();
+    if (!sel) return false;
+    try { input.focus(); } catch (e) {}
+    const rg = document.createRange();
+    rg.setStartAfter(anchor);
+    rg.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(rg);
+
+    input.dispatchEvent(new IE('beforeinput', pageInit({ bubbles: true, cancelable: true, inputType: 'deleteContentBackward' })));
+    await tick();
+    if (chip.isConnected) { stamp('emo', 'del-fail'); return false; }
+
+    const pe = new CE('paste', pageInit({ bubbles: true, cancelable: true }));
+    try { Object.defineProperty(pe, 'clipboardData', { value: dt, configurable: true }); } catch (e) {}
+    input.dispatchEvent(pe);
+    await tick();
+    const ok = String(input.textContent || '').indexOf(text.trim()) >= 0;
+    stamp('emo', ok ? 'ok' : 'paste-fail');
+    return ok;
+  }
+
+  /** 输入栏里扫一遍: 命中 broken 名单的 chip 就地换成短链 */
+  function convertBrokenEmojiChips() {
+    try {
+      const chips = document.querySelectorAll(
+        '[contenteditable="true"] img[data-type="emoji"][data-id], [class*="slateTextArea"] img.emoji[data-id]');
+      for (const chip of chips) {
+        const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
+        if (!m) continue;
+        if (emoGood[m[1]] || !emoBroken[m[1]]) continue;
+        if (chip.getAttribute('data-moe-emo') === 'done') continue;
+        const url = chipEmojiUrl(chip);
+        if (!url) continue;
+        chip.setAttribute('data-moe-emo', 'done');      // 重试也只一次, 不会形循环
+        const nm = m[1];
+        replaceChipWithText(chip, linkText(url) + ' ').then((ok) => { if (!ok) chip.removeAttribute('data-moe-emo'); });
+        stamp('emo', 'take:' + nm);
+      }
+    } catch (e) {}
+  }
+
   /* ---------- 点击劫持: 被锁的表情改成插入 CDN 图链接 ----------
    * 为何不能插 :name: 或 <:name:id> —— 主人实测过:
    *   两种写法发出去服务端都不解析 (外部/动图表情需 Nitro),
@@ -2070,7 +2187,14 @@
     window.postMessage({ __moe: 1, cfg: { enabled: cfg.enabled, tile: cfg.tile, salt: cfg.salt, maxDim: cfg.maxDim, skipAnimated: cfg.skipAnimated, nsfwOnly: cfg.nsfwOnly, nsfwThreshold: cfg.nsfwThreshold, reviewMode: cfg.reviewMode } }, '*');
   }
   function loop() {
-    try { detectMyId(); scanImages(); retagAll(); badgeComposerPreviews(); } catch (e) { stamp('err', 'loop:' + e.message); }
+    try {
+      detectMyId(); scanImages(); retagAll(); badgeComposerPreviews();
+      /* 名单不需要每轮都重扫 (80 条消息的 DOM), 2.4s 一次就够;
+       * chip 转换很轻 (输入拢一共几张), 每轮都跑。 */
+      emoTick = (emoTick + 1) % 2;
+      if (emoTick === 0) scanEmojiRender();
+      convertBrokenEmojiChips();
+    } catch (e) { stamp('err', 'loop:' + e.message); }
     setTimeout(loop, 1200);
   }
 

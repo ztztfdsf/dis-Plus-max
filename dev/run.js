@@ -97,14 +97,15 @@ server.listen(0, '127.0.0.1', () => {
   console.log('▶ Chrome ' + (headful ? '(可见)' : '(headless)') + ' → ' + url);
   const child = spawn(CHROME, args, { stdio: 'ignore', detached: false });
 
-  const timer = setTimeout(() => finish(null), 90000);
+  const RUN_TIMEOUT_MS = Number(process.env.HARNESS_TIMEOUT || 0) || 90000;
+  const timer = setTimeout(() => finish(null), RUN_TIMEOUT_MS);
 
   done.then((results) => {
     clearTimeout(timer);
     try { child.kill(); } catch (e) {}
     server.close();
 
-    if (!results) { console.error('✗ 90s 内没收到结果 (页面脚本可能早退)'); process.exit(1); }
+    if (!results) { console.error('✗ ' + (RUN_TIMEOUT_MS / 1000) + 's 内没收到结果 (页面脚本可能早退)'); process.exit(1); }
     let pass = 0, fail = 0;
     for (const r of results) {
       if (r.pass) { pass++; console.log('  ✓ ' + r.name + (r.extra && !/^\(信息\)/.test(r.name) ? '   [' + r.extra + ']' : '')); }

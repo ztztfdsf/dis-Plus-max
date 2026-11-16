@@ -23,12 +23,24 @@
   <!-- 外服表情判据源: 一条渲染成字面文本 (不可用), 一条渲染成图 (可用) -->
   <div class="messageContent_harness" id="litbox"><span>:bad_emote:</span></div>
   <div class="messageContent_harness" id="litbox2"><span>:bad_emote2:</span></div>
-  <div class="messageContent_harness" id="goodbox"><img class="emoji" data-type="emoji" data-id="999000" alt=":good_emote:" src="https://cdn.discordapp.com/emojis/999000.webp?size=44"></div>
+  <div id="chat-messages-me"><div id="message-content-12345678901234567890-900">
+    <div class="messageContent_harness" id="goodbox"><img class="emoji" data-type="emoji" data-id="999000" alt=":good_emote:" src="https://cdn.discordapp.com/emojis/999000.webp?size=44"></div>
+  </div></div>
+  <!-- 别人发的消息: 表情渲染成图 (发的人有特权) —— 这【不证明】我能发 -->
+  <div id="chat-messages-other"><div id="message-content-1999000000000000000001-901">
+    <div class="messageContent_harness" id="otherbox"><img class="emoji" data-type="emoji" data-id="999001" alt=":other_emote:" src="https://cdn.discordapp.com/emojis/999001.webp?size=44"></div>
+  </div></div>
   <button id="nativebtn">Discord 自己的按钮</button>
 
   <!-- 仿真表情面板: Discord 2026 把面板挂在 clickTrap 里, 点在面板外 = 关面板 -->
   <button id="emoji-trigger" aria-label="添加表情符号">😊</button>
+  <!-- detectMyId 要从左下角用户栏的头像里认出自己 -->
+  <section class="panels_harness"><img src="https://cdn.discordapp.com/avatars/12345678901234567890/aa.png"></section>
+  <!-- 表情面板: 真 Discord 有一个搜索框 (aria-label=搜索), 打字就按名字过滤格子。
+       仿真台必须照做 —— 否则「用面板搜索当可用性神谕」这条用例就是测空气。 -->
+  <button id="picker-trg" aria-label="表情符号"></button>
   <div id="picker-trap" class="clickTrapContainer_aaa trapClicks_bbb" style="display:none">
+    <input id="picker-search" type="text" aria-label="搜索" placeholder="探索最适用的表情符号">
     <div class="emojiPicker_ccc">
       <button id="lk1" data-type="emoji" data-id="1571550119483150561" data-animated="true" data-name="naijing_gif"><span class="emojiLockIcon_zzz"></span></button>
       <button id="fr1" data-type="emoji" data-id="1571549979754111046" data-animated="false" data-name="naijing">🙂</button>
@@ -115,6 +127,27 @@
  * 结果 POST 回 run.js 打印。
  * ══════════════════════════════════════════════════════════════════ */
 (async function () {
+  /* ---------- 仿真表情面板: 开合 + 搜索按名字过滤 ---------- */
+  (function emulatePicker() {
+    const trg = document.getElementById('picker-trg');
+    const trap = document.getElementById('picker-trap');
+    const box = document.getElementById('picker-search');
+    window.__pickerClicks = 0;
+    const apply = () => {
+      const q = String(box.value || '').trim();
+      for (const t of trap.querySelectorAll('button[data-type="emoji"][data-id]')) {
+        const nm = t.dataset.name || '';
+        t.style.display = (!q || nm.indexOf(q) >= 0) ? '' : 'none';
+      }
+    };
+    if (trg && trap) trg.addEventListener('click', () => {
+      window.__pickerClicks++;
+      trap.style.display = trap.style.display === 'none' ? '' : 'none';
+      if (trap.style.display === 'none') { box.value = ''; apply(); }
+    });
+    if (box) box.addEventListener('input', apply);
+  })();
+
   /* ---------- 仿真 Discord 的 Slate 编辑行为 ----------
    * 真页上表情 chip 包在 <span data-slate-void="true" contenteditable="false"> 里,
    * Slate 自己听 beforeinput / paste。仿真台不照做这两件事,
@@ -151,6 +184,7 @@
   });
   const results = [];
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function waitUntil(fn, ms) { const t0 = Date.now(); while (Date.now() - t0 < (ms || 15000)) { let v = false; try { v = !!fn(); } catch (e) { v = false; } if (v) return true; await new Promise((r) => setTimeout(r, 200)); } return false; }
   function ok(name, cond, extra) { results.push({ name, pass: !!cond, extra: extra === undefined ? '' : String(extra) }); }
   function report() { return fetch('/report', { method: 'POST', body: JSON.stringify(results) }); }
 
@@ -497,13 +531,23 @@
   }));
   await sleep(3600);                                  // 洪峰收尾条件: READY 到了且 3s 没新 GUILD_CREATE
   const ui13 = window.__MoeUI || {};
+  /* 探针是「在面板搜索结果里找这颗」→ 自家那颗必须【先出现在面板里】再放 chip,
+   * 否则仿真台自己的 fixture 顺序会让探针得出假的 unusable。 */
+  const grid13b = document.getElementById('picker-trap').querySelector('.emojiPicker_ccc');
+  const preTile = document.createElement('button');
+  preTile.setAttribute('data-type', 'emoji');
+  preTile.dataset.id = GW_MY_EMOJI;
+  preTile.dataset.name = 'gw_my';
+  preTile.setAttribute('data-animated', 'false');
+  grid13b.appendChild(preTile);
   /* ① 输入栏 chip: 没见过的外服表情也转 (不靠学习), 自家服务器的不误伤 */
   const cbox13 = document.getElementById('composer');
   cbox13.innerHTML = '';
   const farChip = mkChip(GW_FAR_EMOJI, 'gw_never_seen');
   const myChip = mkChip(GW_MY_EMOJI, 'gw_my');
   cbox13.focus();
-  await sleep(5200);                                  // 暖一轮 + 转一轮
+  await waitUntil(() => !farChip.isConnected &&
+    cbox13.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/' + GW_FAR_EMOJI + '.webp?size=96)') >= 0, 28000);
   const st13 = (ui13.emo || {}).gw || {};
   const gwDirect = window.__moeGw ? {
     g: window.__moeGw.guilds, e: window.__moeGw.emoji, s: window.__moeGw.sticker,
@@ -514,10 +558,17 @@
     'content侧 ' + JSON.stringify(st13) + ' settled=' + (ui13.emo || {}).settled +
     ' | hook侧 ' + JSON.stringify(gwDirect) + ' | 原始回包 ' + (window.__gwRaw || []).slice(-3).join(' ;; ') + ' __moe消息总数=' + window.__moeMsgs + ' cached=' + (ui13.emo || {}).cached);
   // 读完打印后不再用
+  /* data-gw 由主循环每 2.4s 刷一次, 结论可能刚落地还没打上去 → 等刷新再断言 */
+  await waitUntil(() => /g=1 e=1 s=1/.test((document.getElementById('__moe_diag') || { dataset: {} }).dataset.gw || ''), 7000);
   ok('诊断面板 data-gw 把集合报出来了',
     /g=1 e=1 s=1/.test((document.getElementById('__moe_diag') || { dataset: {} }).dataset.gw || ''),
     (document.getElementById('__moe_diag') || { dataset: {} }).dataset.gw);
 
+  /* 【data-probe 只留最后一次】所以断言看 verdicts, 格式只看一眼 stamp */
+  ok('探针结论进了 verdicts 表 (gw_never_seen → unusable)',
+    (window.__MoeUI.verdicts || []).some((x) => x[0] === 'gw_never_seen' && x[1] === 'unusable') &&
+    /^(usable|unusable|inconclusive|no-search-box|giveup):/.test((document.getElementById('__moe_diag') || {}).dataset.probe || ''),
+    JSON.stringify(window.__MoeUI.verdicts) + ' stamp=' + (document.getElementById('__moe_diag') || {}).dataset.probe);
   ok('【通杀】从未在任何名单里出现过的外服表情 → 输入栏里就转成链',
     !farChip.isConnected && cbox13.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/' + GW_FAR_EMOJI + '.webp?size=96)') >= 0,
     cbox13.textContent.slice(0, 120));
@@ -670,6 +721,69 @@
     !!pillFar && /left:\s*2px/.test(document.getElementById('moe-copy-css').textContent) &&
     !/right:\s*2px/.test(document.getElementById('moe-copy-css').textContent),
     pillFar ? getComputedStyle(pillFar).left + '/' + getComputedStyle(pillFar).opacity : 'no pill');
+
+  /* ---------- 15. 面板搜索 = 可用性神谕 (复制来的外服表情通杀) ----------
+   * 实页 A/B: qq_chaoticshock → 1 格 isLocked=false; nienie_shengjiang → 1 格;
+   *           rin_miao_full_angry → 0 格 (就是发出去报「没会员」那个)
+   * ⇒ 搜不到 = Discord 的可用库里不给我用 → 判用不了 → 就地转链。
+   */
+  const ui15 = window.__MoeUI;
+  /* 可用的那颗: 面板里有格子且 isLocked=false */
+  mkFiberTile({ id: '1900000000000000001', name: 'probe_ok_emote', guild: '1349298998988771359' });
+  /* 用不了的那颗: 面板里【根本没有】它的格子 (库里不给我用) */
+  const cbox15 = document.getElementById('composer');
+  cbox15.innerHTML = '';
+  const mkRaw = (id, name) => {
+    const im = document.createElement('img');
+    im.className = 'emoji';
+    im.setAttribute('data-type', 'emoji');
+    im.dataset.id = id;
+    im.setAttribute('alt', ':' + name + ':');
+    im.src = 'https://cdn.discordapp.com/emojis/' + id + '.webp?size=44';
+    cbox15.appendChild(im);
+    return im;
+  };
+  const pOk = mkRaw('1900000000000000001', 'probe_ok_emote');
+  const pFar = mkRaw('1900000000000000002', 'probe_far_emote');
+  cbox15.focus();
+  const clicks0 = window.__pickerClicks;
+  await waitUntil(() => (ui15.verdicts || []).some((x) => x[0] === 'probe_far_emote') && !pFar.isConnected, 32000);
+  const txt15 = cbox15.textContent;
+  const vd = {};
+  for (const pair of ui15.verdicts || []) vd[pair[0]] = pair[1];
+  ok('零证据的那颗 → 探针按搜索结果判 unusable; 有实体 (isLocked=false) 的那颗不探也不动',
+    vd.probe_far_emote === 'unusable' && ui15.emojiUnusable(ui15.ents['1900000000000000001']) === false,
+    JSON.stringify(vd) + ' ent判定=' + ui15.emojiUnusable(ui15.ents['1900000000000000001']));
+  ok('【通杀】从聊天里复制来的外服表情 (零证据) 被就地换成 [. ](URL)',
+    !pFar.isConnected && txt15.indexOf('[. ](https://cdn.discordapp.com/emojis/1900000000000000002.webp?size=96)') >= 0,
+    txt15.slice(0, 130));
+  ok('能用的那颗原样留着 (不再误伤)', cbox15.contains(pOk), 'ok 还在=' + cbox15.contains(pOk));
+  await waitUntil(() => (document.getElementById('picker-search').value || '') === '', 14000);
+  ok('探针把搜索框清空了 (不污染面板)',
+    (document.getElementById('picker-search').value || '') === '',
+    JSON.stringify(document.getElementById('picker-search').value));
+  const dclicks = window.__pickerClicks - clicks0;
+  ok('探针不留面板 (本来开着就不动; 自己开的就开+关成双)',
+    dclicks === 0 || dclicks % 2 === 0, '点击次数增量=' + dclicks);
+  /* 同名已有结论 → 不再开面板, 也不转换 (结论缓存生效) */
+  const clicks15 = window.__pickerClicks;
+  const pOk2 = mkRaw('1900000000000000001', 'probe_ok_emote');
+  cbox15.focus();
+  await sleep(3200);
+  ok('已判「能用」的名字不再触发开面板 (结论缓存生效, 不反复弹)',
+    window.__pickerClicks === clicks15 && cbox15.contains(pOk2),
+    '开面板增量=' + (window.__pickerClicks - clicks15) + ' 还在=' + cbox15.contains(pOk2));
+
+  /* ---------- 16. 轴心修正: 别人发的图不等于我能发 ---------- */
+  document.getElementById('otherbox').innerHTML =
+    '<img class="emoji" data-type="emoji" data-id="1900000000000000009" alt=":other_people_emote:" src="https://cdn.discordapp.com/emojis/1900000000000000009.webp?size=44">';
+  ui15.scanEmojiRender();
+  ok('【回归】别人消息里渲染成图的表情 → 不再记进「可用」名单 (渲染按读者的权, 发送看作者的权)',
+    ((window.__MoeUI.emo || {}).good || []).indexOf('other_people_emote') < 0,
+    JSON.stringify((window.__MoeUI.emo || {}).good));
+  ok('【正向对照】我自己发的消息里渲染成图 → 记进可用名单 (这才算证据)',
+    ((window.__MoeUI.emo || {}).good || []).indexOf('good_emote') >= 0,
+    JSON.stringify((window.__MoeUI.emo || {}).good));
 
   await report();
 })();

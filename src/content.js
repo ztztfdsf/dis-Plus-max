@@ -980,8 +980,6 @@
         }
         return;
       }
-      /* 网关探针回包: hook.js 从 GUILD_CREATE 里学到的「我自己的 id」 */
-      if (e.data.gw === 1) { gwReply(e.data); return; }
       if (!e.data.ev) return;
       const d = e.data;
       tele(d);
@@ -1044,7 +1042,7 @@
   }
   /* 调试/仿真入口。v3.7.12 之前只挂在非扩展分支上 —— 带 shim 的形态里
    * EXT 为真, 仿真台/面板就什都拿不到, 提到分支外两种形态都有。 */
-    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, scanEmojiRender, convertBrokenEmojiChips, gwWarmAll, gwState, addCopyButtons, harvestDescriptors, tileLockInfo, emojiUnusable, probeUsable, copyText, get undecided() { const c = findUndecidedChip(); return c ? String(c.alt) : null; }, get verdicts() { return Array.from(useVerdict.entries()); }, get entities() { return Object.keys(emojiEnt).length; }, get ents() { return emojiEnt; }, get allowAnim() { return allowAnimatedHere; }, get guild() { return currentGuildId(); }, get decisions() { return decisions.slice(); }, get cfg() { return cfg; }, get emo() { return { good: Object.keys(emoGood), broken: Object.keys(emoBroken), gw: gwStats, settled: gwSettled, cached: gwCache.size }; } };
+    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, convertBrokenEmojiChips, addCopyButtons, copyText, composerChips, chipUrlOf: chipEmojiUrl, get tried() { return Object.assign({}, emoTried); }, get decisions() { return decisions.slice(); }, get cfg() { return cfg; } };
 
   /* ---------- 移除举报入口 (主人要求: 整个 Discord 界面去掉举报) ---------- */
   const REPORT_KEYWORDS = ['report', '举报', '報告', '申告'];
@@ -1659,19 +1657,15 @@
       }
     } catch (e) {}
     try {
-      /* 【先固化锁信号, 再去掉 aria-disabled】顺序不能反 —— 这就是主人报的
-       * 「解锁了的表情插不出链接」的真因, 详见 emojiLocked() 的注释。 */
+      /* 只做一件事: 摘掉 Discord 拦点击的 aria-disabled。
+       * 【不再判「锁没锁」】主人拍板「一律提取链接、不走原生」后, 锁信号没有
+       * 消费者了 —— 旧的 markEmojiLock/emojiLocked(靠猜 DOM) 与 data-moe-lock
+       * 一并删除, 少一套会误判的状态。 */
       document.querySelectorAll('button[data-type="emoji"], [class*="emojiItem"]').forEach((el) => {
         const host = emojiHost(el);
-        markEmojiLock(host);
-        // 去掉禁用标记 (Discord 用 aria-disabled 拦点击)
         if (host.getAttribute('aria-disabled') === 'true') host.removeAttribute('aria-disabled');
         if (el !== host && el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
       });
-      /* 不再给 lockedEmoji 图打 data-moe-unlocked 标记 —— 实测发现面板里
-       * 【所有 57 个表情】的图都带这个类名, 拿它当锁信号会把本服可用表情
-       * 也当成锁住的 → 本可以原生发的表情反而被我们换成了链接。
-       * 锁定判定改由 emojiLocked() 判断。 */
     } catch (e) {}
   }
 
@@ -1845,81 +1839,6 @@
     return false;
   }
 
-  /* ══════════════ 网关判据客户端 (数据在 hook.js 那一侧) ══════════════
-   * hook.js 在 document_start 包了页面 JSON.parse, 从网关 GUILD_CREATE 里
-   * 把【我加入的所有服务器】的 emojis[]/stickers[] 存成两个 Set。
-   * id 在 Set 里 = 我能原生用; 不在 = 外服 = 发出去只会变一串字面字符。
-   * 这是「全部外服表情通杀」的根 —— 不再靠偶然在滞动条里见过它挂掉。
-   * (2026-11-16 实页探过: Discord 的 9044 个 webpack 模块属性名被 terser 打了,
-   *  getAllReadyEmojis / isUsable / EmojiStore 全 0 命中 → 抓内部函数不可靠;
-   *  而网关 dispatch 就是走页面 JSON.parse, 原文形如
-   *  {"t":"MESSAGE_CREATE","s":1706,"op":0,"d":{...}})
-   *
-   * 三条铁律:
-   *   ① 洪峰没完 (settled=false) 一律当 unknown —— 否则开机那几秒会把
-   *      自家服务器的表情误判成外服, 把能用的东西换成链接
-   *   ② unknown 绝不动手 (只有确定的 foreign 才接手)
-   *   ③ 面板/输入框里的 id 提前批量暖好 —— 点击时才能同步出结论 */
-  const gwCache = new Map();          // 'e:<id>' | 's:<id>' → true=我的 / false=外服
-  const gwWaiters = new Map();
-  let gwSeq = 0;
-  let gwReady = false;                // hook.js 回过话 = 探针在跑
-  let gwSettled = false;              // 洪峰完了没
-  let gwStats = { g: 0, e: 0, s: 0, p: -1, r: 0 };
-
-  function gwKey(kind, id) { return (kind === 'sticker' ? 's:' : 'e:') + String(id); }
-
-  function gwReply(d) {
-    gwReady = true;
-    gwSettled = !!d.settled;
-    if (d.stats) gwStats = d.stats;
-    const w = gwWaiters.get(d.reqId);
-    if (!w) return;
-    clearTimeout(w.timer);
-    gwWaiters.delete(d.reqId);
-    const own = new Set((d.own || []).map(String));
-    for (const id of w.ids) gwCache.set(w.key + id, own.has(id));
-  }
-
-  /** 批量暖缓存 (fire-and-forget; 下一轮或下次点击就能同步拿到结论) */
-  function gwWarm(kind, ids) {
-    const key = kind === 'sticker' ? 's:' : 'e:';
-    const need = [];
-    for (const raw of ids) {
-      const id = String(raw || '');
-      if (!id || gwCache.has(key + id)) continue;
-      if (need.indexOf(id) < 0) need.push(id);
-    }
-    if (!need.length) return;
-    const reqId = ++gwSeq;
-    const timer = setTimeout(() => { if (gwWaiters.delete(reqId)) stamp('gw', 'no-answer:' + need.length); }, 2500);
-    gwWaiters.set(reqId, { ids: need, key, timer });
-    try { window.postMessage({ __moe: 1, gwq: 1, reqId, kind, ids: need }, '*'); }
-    catch (e) { clearTimeout(timer); gwWaiters.delete(reqId); }
-  }
-
-  /** 'own' 我的 | 'foreign' 外服 | 'unknown' 还不肯定 (洪峰未完/未暖/探针没跑)
-   * 【空集合必须当未知 —— 这是一颗假阳性地雷】实页实测这台机器
-   *   GUILD_CREATE 一条都不发 → e=0/s=0。若照字面把「不在集合里」判成外服,
-   *   那就等于【所有表情都算外服】→ 连能用的都被换成链接。
-   *   所以集合为空时整条判据作废, 交给面板搜索 (probeUsable) 定结论。 */
-  function gwState(kind, id) {
-    if (!gwReady || !gwSettled || !id) return 'unknown';
-    if (kind === 'sticker' ? !gwStats.s : !gwStats.e) return 'unknown';
-    const v = gwCache.get(gwKey(kind, id));
-    return v === true ? 'own' : v === false ? 'foreign' : 'unknown';
-  }
-
-  /** 把当前 DOM 上能看到的表情/贴纸 id 全暖一遍 (面板开着就是那几百个) */
-  function gwWarmAll() {
-    try {
-      const e = [];
-      for (const b of document.querySelectorAll('button[data-type="emoji"][data-id]')) e.push(b.dataset.id);
-      for (const el of document.querySelectorAll('[contenteditable="true"] img[data-type="emoji"][data-id]')) e.push(el.dataset.id);
-      if (e.length) gwWarm('emoji', e);
-    } catch (err) {}
-  }
-
   /* ---------- 复制为链接格式 ----------
    * 主人报的缺口: Discord 给贴纸【没有任何复制入口】(右键只有复制图片/
    * 复制消息链接), 想拿它的图链只能自己抓。这里给表情/贴纸补上:
@@ -1945,71 +1864,44 @@
     return Promise.resolve(copyFallback(text));
   }
 
-  /* ---------- 外服表情: 还在输入栏里就就地换成短链图 ----------
-   * 【现象】用了你不在的服务器的表情 (非伙伴/认证服), 输入栏里能正常渲染成图,
-   *   但 Discord 照样把 <:name:id> 发出去, 接收端 (连自己) 只看到一串字面字符。
-   * 【一手证据 2026-11-16 实页】
-   *   发送 body: {"content":"<:rin_miao_full_angry:1397468110776172654>"}
-   *   渲染结果: <span>:rin_miao_full_angry:</span>   ← 没图
-   *   同期另两条外服表情渲染成 img.emoji; 三条的 CDN 全是 HTTP 200
-   *   → 差异不在图在不在, 而在【我们自己的客户端能不能解析它】—— 这就是判据。
-   * 【两个名单, 都从已渲染的消息里学, 零猜测】
-   *   good   : 某个表情名在消息里渲染成 <img> → 可用, 永远不碰
-   *   broken : 某个表情名在消息里渲染成字面 :name: 文本 → 对我们不可用
-   *   输入栏里出现 broken 名单上的 chip (Discord 的 chip 自带 data-id 与
-   *   alt=":name:", URL 就是它自己的 src) → 选中它, 换成 `[. ](那个 URL)`。
-   *   发送时文本已经是链接; [. ](URL) 与裸 URL 的服务端 embed 实测一致。
-   * 【为什么不在发送时刻改 body】那样你根本看不见换了什么。现在你在输入栏里
-   *   就能看到一个点 + 图照旧出。
-   * 【已知局限】一个表情第一次用 (滚动条里从没见过它的字面渲染) 时判不出来,
-   *   那条依旧原样发; 但它当场就在滚动条里留下字面文本, 从下一个起自动转链。
+  /* ---------- 自定义表情一律在输入栏里就地换成短链图 ----------
+   * 【规则 (主人 2026-11-16 拍板)】输入框里只要出现自定义表情的 chip
+   *   (Discord 自己渲染的 <img data-type="emoji" data-id alt=":name:">),
+   *   就把它的图链取出来、原地换成 `[. ](URL)` —— 不判它「能不能用」、
+   *   不走原生路线, 与表情栏里点一颗表情后我们做的事完全一致。
+   * 【一手证据 (为何原生路线对外服表情是坏的)】实页抓到的发送 body:
+   *   {"content":"<:rin_miao_full_angry:1397468110776172654>"}
+   *   → 渲染成 <span>:rin_miao_full_angry:</span> (没图); 同一时刻另两条
+   *   外服表情渲染成 img.emoji, 三条 CDN 全 200 —— 差别只在【我们这边的
+   *   客户端此刻能不能解析它】, 而这正是主人不想赌的东西。
+   * 【为什么在输入栏改而不是在发送时改 body】那样你根本看不见换了什么;
+   *   现在你在输入栏里当场看到一个点 + 图照旧出。
+   * 【为什么用 `[. ](URL)` 而不是裸 URL】短、不刷屏; 实弹 A/B 过:
+   *   裸 URL 与 `[. ](URL)` 的服务端 embed 完全一致 (都出 inlineMediaEmbed 96×96)。
+   * 【标准 unicode emoji 不碰】它们没有 data-id, 也不会有「发不出去」的问题。
    */
   const EMO_NAME = /^:([a-zA-Z0-9_]{2,64}):$/;
-  const emoGood = Object.create(null);      // 名字 → 渲染成过图 (可用)
-  const emoBroken = Object.create(null);    // 名字 → 渲染成过字面文本 (不可用)
-  /* 名字 → 尝试失败次数。上限 2 次就不再试: paste 有可能实际已落文本但校验没对上,
-   * 每 1.2s 重贴一次会变成 `[. ](url) [. ](url) …` 满屏——宁可不换也不能贴一串。 */
+
+  /* 名字 → 尝试失败次数 (上限见 findNextBrokenChip) */
   const emoTried = Object.create(null);
   let emoTick = 0;
 
-  /** 从已渲染的消息里学「这个表情名对我们能不能解析」 */
-  function scanEmojiRender() {
-    try {
-      const boxes = document.querySelectorAll('[class*="messageContent_"]');
-      const from = Math.max(0, boxes.length - 80);      // 只看最近 80 条, 成本可控
-      for (let i = from; i < boxes.length; i++) {
-        const box = boxes[i];
-        /* 【渲染成图 ≠ 我能发 —— 上一版就是死在这】
-         * 2026-11-16 主人的实测: 从聊天里直接复制外服表情发出去「报没会员」,
-         * 而那条原消息里它是渲染成图的 (发的人有 Nitro/伙伴服特权 —— 渲染按
-         * 阅读者的权, 发送看作者的权, 两个轴)。
-         * 旧版把它记进 emoGood 当「永不接手」→ 就是你说的「依旧没转成链接」。
-         * 现在只认一个硬证据: 【我自己发出去过、且现在仍渲染成图】
-         * 那才证明我确实能发。别人发的图什幺也不证明 → 交给面板搜索探。 */
-        let mine = false;
-        try {
-          const mw = box.closest('[id^="chat-messages-"]');
-          const cc = mw && mw.querySelector('[id^="message-content-"]');
-          const aid = cc ? String(cc.id).split('-')[2] : '';
-          mine = !!(myUserId && aid && aid === myUserId);
-        } catch (e) { mine = false; }
-        if (mine) {
-          for (const im of box.querySelectorAll('img.emoji, img[data-type="emoji"]')) {
-            const m = EMO_NAME.exec(String(im.getAttribute('alt') || '').trim());
-            if (m) emoGood[m[1]] = 1;
-          }
-        }
-        /* 直接子 span 的纯文本就是 :name: → 我连看都看不到, 发出去也一样 */
-        for (const sp of box.children) {
-          if (!sp || sp.tagName !== 'SPAN') continue;
-          if (sp.querySelector && sp.querySelector('img')) continue;
-          const m = EMO_NAME.exec(String(sp.textContent || '').trim());
-          if (m && !emoGood[m[1]]) emoBroken[m[1]] = Date.now();
-        }
-      }
-    } catch (e) {}
+  /** 输入框里的所有表情 chip —— 只有这些会跟着消息发出去
+   * 【两条选择器通道都必须留】真 Discord 的 chip 带 data-type="emoji";
+   *  有的构建/形态只有 class="emoji" + data-id —— 少一条就一颗都扫不到,
+   *  整个「输入栏就地转链」静默失效 (本轮删代码时就丢过一次, 17 条用例齐红)。 */
+  function composerChips() {
+    const input = composerEl();
+    if (!input) return [];
+    const seen = new Set();
+    const out = [];
+    for (const el of input.querySelectorAll('img[data-type="emoji"][data-id], img.emoji[data-id]')) {
+      if (seen.has(el)) continue;
+      seen.add(el);
+      out.push(el);
+    }
+    return out;
   }
-
   /** chip 自己的 src 就是表情图地址; 只把尺寸提一档, 扩展名保持原样
    * (外服表情在输入栏里用的就是 .webp, 动图也是动 webp —— 不用猜 gif) */
   function chipEmojiUrl(img) {
@@ -2091,279 +1983,23 @@
     return true;
   }
 
-  /** 下一个要接手的 chip: 命中 broken 名单、不在 good 名单、还没试过的第一个 */
-  /* ---------- Discord 自己的可用性判定 (从 React fiber 读) ----------
-   * 2026-11-16 实页一手证据, 表情格子的 fiber 里就摆着:
-   *   props.children.props = {
-   *     emoji: {guildId,id,animated,name,require_colons,available,roles,managed,version,type},
-   *     isLocked: false, allowAnimatedEmoji: true, size: 40, columnIndex, rowIndex }
-   *   整面板的清单在同一条 fiber 的 props.emojiDescriptors[N].emoji
-   * 【为何用它而不是猜 DOM】上一版靠 aria-disabled/锁图标猜, 实测把
-   *   isLocked=false 的【本服静态表情】当成锁着 → 好好的表情被换成链接。
-   * 【为何不用网关集合】实页探针: 瘦身 READY 之后一条 GUILD_CREATE 都没有
-   *   (g=0 e=0 s=0), 那套判据在这台上天然拿不到数据 —— 所以换层。 */
-  const emojiEnt = Object.create(null);     // id → {name, guildId, animated, locked?}
-  let allowAnimatedHere = null;            // 这条频道允许自动图不 (Discord 给的)
-
-  function fiberEmojiBag(el, up) {
-    try {
-      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
-      let f = fk ? el[fk] : null;
-      for (let i = 0; i < (up || 5) && f; i++) {
-        for (const p of [f.memoizedProps, f.pendingProps]) {
-          if (!p) continue;
-          if (p.emoji && (p.emoji.id || p.emoji.guildId)) return p;
-          const c = p.children && p.children.props;
-          if (c && c.emoji && (c.emoji.id || c.emoji.guildId)) return c;
-        }
-        f = f.return;
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  /** 格子/chip 上 Discord 的判定; 拿不到返回 null
-   * 【locked 三态】Discord 给了布尔才算结论; 没给就是 undefined(未知) ——
-   * 当成 false 会把「拿不到判定」误读成「能用」, 当成 true 会误伤。 */
-  function tileLockInfo(el) {
-    if (!el || !el.dataset) return null;
-    const cur = el.__moeLockCache;
-    if (cur && cur.id === el.dataset.id) return cur.info;
-    const bag = fiberEmojiBag(el, 5);
-    const info = bag ? {
-      locked: typeof bag.isLocked === 'boolean' ? bag.isLocked : undefined,
-      anim: bag.allowAnimatedEmoji !== false,
-      emoji: bag.emoji,
-    } : null;
-    try { el.__moeLockCache = { id: el.dataset.id, info }; } catch (e) {}
-    return info;
-  }
-
-  /** 把面板整份清单收进缓存 (拿不到整份就逐格收) */
-  function harvestDescriptors() {
-    try {
-      const t = document.querySelector('button[data-type="emoji"][data-id]');
-      if (!t) return;
-      const fk = Object.keys(t).find((k) => k.indexOf('__reactFiber$') === 0);
-      let f = fk ? t[fk] : null;
-      for (let i = 0; i < 16 && f; i++) {
-        for (const p of [f.memoizedProps, f.pendingProps]) {
-          if (p && Array.isArray(p.emojiDescriptors) && p.emojiDescriptors.length) {
-            for (const d of p.emojiDescriptors) {
-              const e = d && d.emoji;
-              if (!e || !e.id) continue;
-              const rec = { name: e.name, guildId: String(e.guildId || ''), animated: !!e.animated };
-              if ('locked' in d) rec.locked = d.locked === true;          // 没这个键 = 未知
-              emojiEnt[e.id] = rec;
-            }
-            if (typeof p.allowAnimatedEmoji === 'boolean') allowAnimatedHere = p.allowAnimatedEmoji;
-            return;
-          }
-        }
-        f = f.return;
-      }
-      for (const el of document.querySelectorAll('button[data-type="emoji"][data-id]')) {
-        const info = tileLockInfo(el);
-        if (info && info.emoji && info.emoji.id) {
-          emojiEnt[info.emoji.id] = { name: info.emoji.name, guildId: String(info.emoji.guildId || ''), animated: !!info.emoji.animated, locked: info.locked };
-          if (allowAnimatedHere === null) allowAnimatedHere = info.anim;
-        }
-      }
-    } catch (e) {}
-  }
-
-  function currentGuildId() {
-    const m = /\/channels\/(\d+)\//.exec(location.pathname || '');
-    return m ? m[1] : null;
-  }
-
-  /** 这个表情在【当前频道】用得了吗 —— true=用不了, false=能用, null=判不出 */
-  function emojiUnusable(ent) {
-    if (!ent) return null;
-    if (ent.locked === true) return true;                  // Discord 明说锁了
-    if (ent.locked === false) return false;                // Discord 明说能用
-    if (gwStats.p > 0) return false;                       // 有会员 → 全都能用, 不接
-    const g = currentGuildId();
-    if (!g) return null;
-    if (ent.guildId && ent.guildId !== g) return true;      // 跳服务器且没会员 (主人报的那一类)
-    if (ent.animated && allowAnimatedHere === false) return true;
-    return false;
-  }
-
-  /** 输入框里的所有表情 chip (只这些会跟着发出去)
-   * 【两条通道都要】真 Discord 的 chip 带 data-type="emoji"; 但有的构建/仿真台
-   * 只有 class="emoji" + data-id —— 丢掉第二条就会【一颗都扫不到】= 整个
-   * 「输入栏就地转链」静默失效 (本轮就是这么把用例打空的)。 */
-  function composerChips() {
-    const input = composerEl();
-    if (!input) return [];
-    const seen = new Set();
-    const out = [];
-    for (const el of input.querySelectorAll('img[data-type="emoji"][data-id], img.emoji[data-id]')) {
-      if (seen.has(el)) continue;
-      seen.add(el);
-      out.push(el);
-    }
-    return out;
-  }
-
-  /* ---------- 面板搜索 = Discord 自己的「我能不能用它」清单 ----------
-   * 2026-11-16 实页 A/B (input[aria-label="搜索"], placeholder「探索最适用的表情符号」):
-   *   qq_chaoticshock     → 1 格, guildId=当前服务器, isLocked=false   ← 能用
-   *   nienie_shengjiang   → 1 格, 同上                                    ← 能用
-   *   rin_miao_full_angry → **0 格** (就是发出去报「没会员」那个)     ← 用不了
-   * ⇒ 搜索结果里【根本没有】= Discord 的可用库里不给我用 → 判用不了;
-   *   【有】则看它自己的 isLocked。零网络、零 token、不碰内部函数名。
-   * 【为何需要它】chip 自己的 fiber 里没有实体 (实页实测消息 chip 只有
-   *   src/alt/data-id), 网关集合在这台又是空的 (g=0) —— 只有这条通道能
-   *   覆盖「任意来源的任意表情」, 包括你从聊天里直接复制过来的那个。
-   * 【代价 (要知情)】会短暂打开表情面板并往搜索框打字 (~1s), 查完清空搜索、
-   *   面板是我们开的就关掉。每个名字只探一次 (useVerdict 缓存), 不会反复弹。 */
-  const useVerdict = new Map();          // name → 'usable' | 'unusable' | 'unknown'(放弃)
-  const probeTries = new Map();          // name → 判不出的次数 (≥2 放弃, 不反复开面板)
-  let probing = false;
-  const waitMs = (n) => new Promise((r) => setTimeout(r, n));
-
-  function pickerSearchBox() {
-    try {
-      return [...document.querySelectorAll('input')].find((i) => i.offsetParent !== null &&
-        /搜索|表情|emoji/i.test((i.getAttribute('aria-label') || '') + ' ' + (i.placeholder || ''))) || null;
-    } catch (e) { return null; }
-  }
-  /** 【只数看得见的格子】面板关着时 DOM 里可能还留着上一次的面包屑 ——
-   * 拿它当「面板已打开」会让搜索探针在旧清单上读数, 把【自家服务器的表情】
-   * 误判成「库里没有」→ 假阳性转链 (仿真台就是这么抓出来的)。 */
-  function visibleEmojiTiles() {
-    return [...document.querySelectorAll('button[data-type="emoji"][data-id]')].filter((t) => t.offsetParent !== null);
-  }
-  function pickerTrigger() {
-    return [...document.querySelectorAll('[aria-label*="表情符号"], [id^="emoji-button"]')].find((b) => b.offsetParent !== null) || null;
-  }
-  function setSearch(box, v) {
-    try {
-      const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(box), 'value') ||
-        Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-      if (d && d.set) d.set.call(box, v);
-      else box.value = v;
-      box.dispatchEvent(new Event('input', { bubbles: true }));
-    } catch (e) {}
-  }
-
-  /** 探一个表情的可用性 —— 'usable' / 'unusable' / null(判不出, 什么都别说) */
-  async function probeUsable(name, id) {
-    if (!name) return null;
-    const known = useVerdict.get(name);
-    if (known) return known;
-    /* 硬证据优先: 我自己发出去过且现在仍渲染成图 = 我确实能发 → 不必开面板 */
-    if (emoGood[name]) { useVerdict.set(name, 'usable'); return 'usable'; }
-    if (probing) { stamp('probe', 'busy'); return null; }        // 一次只开一个面板; 下一轮再来
-    probing = true;
-    let openedByUs = false;
-    try {
-      if (!visibleEmojiTiles().length) {
-        const trg = pickerTrigger();
-        if (!trg) { stamp('probe', 'no-trigger'); return null; }
-        trg.click();
-        openedByUs = true;
-        await waitMs(1300);
-      }
-      const box = pickerSearchBox();
-      if (!box) { stamp('probe', 'no-search-box:' + name); return null; }
-      /* 【搜索前后各数一次, 两者不同义 —— 上一版把这两种混为一谈,
-       *   于是永远判不出、反复白开面板 (仿真台打出 23 次调用 0 结论)】
-       *   搜索前有格子、搜索后一格不剩 = 结果被过滤光 = 库里不给我用 → unusable
-       *   搜索前后都是 0 格               = 面板根本没渲染出来 → 不下结论 */
-      const beforeTiles = visibleEmojiTiles().length;
-      setSearch(box, name);
-      await waitMs(1000);                       // 结果虚拟化, 给它渲染时间
-      const tiles = visibleEmojiTiles();
-      let listed = tiles.length, hit = null;
-      for (const t of tiles) {
-        if ((id && t.dataset.id === id) || (t.dataset.name || '') === name) { hit = t; break; }
-      }
-      let v;
-      if (!listed) v = beforeTiles > 0 ? 'unusable' : null;   // 全被过滤光 vs 面板没活
-      else if (!hit) v = 'unusable';             // 库里不给我用
-      else {
-        const info = tileLockInfo(hit);
-        v = (info && info.locked === true) ? 'unusable' : 'usable';
-        if (hit.dataset.id) {
-          emojiEnt[hit.dataset.id] = {
-            name: hit.dataset.name || name,
-            guildId: info && info.emoji ? String(info.emoji.guildId || '') : '',
-            animated: !!(info && info.emoji && info.emoji.animated),
-            locked: info ? info.locked : undefined,
-          };
-        }
-      }
-      if (v) useVerdict.set(name, v);
-      else {
-        /* 判不出的名字最多探 2 次就放弃 —— 不能每 1.2s 白开一次面板 */
-        const n2 = (probeTries.get(name) || 0) + 1;
-        probeTries.set(name, n2);
-        if (n2 >= 2) { useVerdict.set(name, 'unknown'); stamp('probe', 'giveup:' + name); }
-      }
-      stamp('probe', (v || 'inconclusive') + ':' + name + '(' + listed + '/' + beforeTiles + ')');
-      return v;
-    } catch (e) {
-      stamp('probe', 'err:' + String((e && e.message) || e).slice(0, 34));
-      return null;
-    } finally {
-      try {
-        const box2 = pickerSearchBox();
-        if (box2 && box2.value) setSearch(box2, '');
-      } catch (e) {}
-      if (openedByUs) { try { const trg = pickerTrigger(); if (trg) trg.click(); } catch (e) {} }
-      probing = false;
-    }
-  }
-
-  /** 没有任何证据、也还没探过的 chip (交给 probeUsable 定结论) */
-  function findUndecidedChip() {
+  /** 下一个要接手的 chip：输入框里第一颗还没处理过的自定义表情 chip
+   * 【一律转链，不判可用性 —— 主人拍板原话】「就是让你提取表情链接，然后以网址
+   *   链接形式发送，不是要走原生上的路线，就像表情栏锁上表情解锁发送一样」
+   * 上一版那整套门禁（fiber 的 isLocked、网关 GUILD_CREATE 集合、面板搜索探针、
+   * 渲染学习）存在的唯一理由是「能用就别动」；主人要的是【别走原生】，所以门禁
+   * 整块删除。附带三个好处：没有可见副作用（不再开面板打字）、没有误判空间、
+   * 少约 250 行状态机。
+   * 【上限 3 次】paste 有可能实际已落文本但校验没对上 —— 每 1.2s 重贴会糊满屏。 */
+  function findNextBrokenChip() {
     for (const chip of composerChips()) {
       const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
-      if (!m) continue;
+      if (!m) continue;                                              // 标准 emoji (无 :name:) 不碰
       const name = m[1];
-      if (useVerdict.has(name) || emoGood[name]) continue;         // 已有结论 / 我自己发过 → 不探
-      if (chip.getAttribute('data-moe-emo')) continue;
-      const hard = emojiUnusable(emojiEnt[chip.getAttribute('data-id')]);
-      if (hard !== null || emoBroken[name]) continue;                 // 有硬证据的交给 findNextBrokenChip
-      return chip;
-    }
-    return null;
-  }
-
-  function findNextBrokenChip() {
-    const chips = composerChips();
-    for (const chip of chips) {
-      const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
-      if (!m) continue;
-      const name = m[1];
-      if (emoGood[name]) continue;                                   // 渲染成过图 → 永不碰
-      /* 【主判据】Discord 自己的实体 (chip 的 fiber 里可能直接带着, 带 guildId);
-       * 【兼容】网关集合旁证 + 旧版从滞动条学下来的 broken */
-      const cid = chip.getAttribute('data-id');
-      let ent = emojiEnt[cid] || null;
-      if (!ent) {
-        const info = tileLockInfo(chip);
-        if (info && info.emoji && info.emoji.id) {
-          ent = emojiEnt[info.emoji.id] = { name: info.emoji.name, guildId: String(info.emoji.guildId || ''), animated: !!info.emoji.animated, locked: info.locked };
-        }
-      }
-      /* 【结论来源四条, 缺一不可】探针的结论必须在这里也被认——上一版就是
-       * 探针把名字判成 unusable 之后, 这里只认实体/broken, 那颗 chip 反而
-       * 成了孤儿 (findUndecidedChip 又跳过已有结论的名字) → 永远不转。 */
-      const vd = useVerdict.get(name);
-      if (vd === 'usable') continue;
-      const u = emojiUnusable(ent);
-      if (u === false || emoGood[name]) continue;                     // 确定能用 / 我自己发过 → 不碰
-      /* 只有软旁证(网关)不够 —— 必须硬证据、面板结论或「我看都看不见」。
-       * 网关集合在实页是空的, 拿它单独判定会把能用的也判成外服 (假阳性)。 */
-      if (u !== true && vd !== 'unusable' && !emoBroken[name]) continue;   // → 交给 probeUsable
-      if (emoTried[name] >= 2) { chip.setAttribute('data-moe-emo', 'skip'); continue; }
-      if (chip.getAttribute('data-moe-emo')) continue;              // 试过 / 已放弃
+      if (emoTried[name] >= 3) { chip.setAttribute('data-moe-emo', 'skip'); continue; }
+      if (chip.getAttribute('data-moe-emo')) continue;               // 试过 / 已放弃
       if (!chipEmojiUrl(chip)) continue;
-      chip.setAttribute('data-moe-emo', 'done');                    // 先标记再动手, 不会形循环
+      chip.setAttribute('data-moe-emo', 'done');                     // 先标记再动手，不会形循环
       return chip;
     }
     return null;
@@ -2381,22 +2017,8 @@
     emoBusy = true;
     try {
       for (let guard = 0; guard < 8; guard++) {
-        let chip = findNextBrokenChip();
-        if (!chip) {
-          /* 没任何证据的 chip (你从聊天里直接复制过来的就是这一类):
-           * 用【面板搜索】让 Discord 自己回答能不能用 —— 搜不到 = 用不了 */
-          const cand = findUndecidedChip();
-          if (!cand) break;
-          const nm2 = EMO_NAME.exec(String(cand.getAttribute('alt') || '').trim())[1];
-          const v = await probeUsable(nm2, cand.getAttribute('data-id'));
-          if (v === 'unusable') {
-            cand.setAttribute('data-moe-emo', 'done');
-            chip = cand;
-          } else {
-            if (v === 'usable') cand.setAttribute('data-moe-emo', 'skip');   //  Discord 说能用 → 永不碰
-            break;                                    // null = 判不出, 下一轮再说
-          }
-        }
+        const chip = findNextBrokenChip();
+        if (!chip) break;
         const url = chipEmojiUrl(chip);
         const name = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim())[1];
         const ok = await replaceChipWithText(chip, linkText(url) + ' ');
@@ -2487,62 +2109,6 @@
     if (item.matches && item.matches('button[data-type="emoji"]')) return item;
     return (item.querySelector && item.querySelector('button[data-type="emoji"]')) || item;
   }
-
-  /** Discord 自己的锁信号 (只读实时状态, 不含我们写的标记) */
-  function emojiLockedLive(host) {
-    if (!host) return false;
-    if (host.getAttribute && host.getAttribute('aria-disabled') === 'true') return true;
-    if (host.querySelector && host.querySelector('[class*="emojiLockIcon"]')) return true;
-    if (host.closest && host.closest('[class*="NitroLocked"]')) return true;
-    const li = host.closest && host.closest('li');
-    if (li && li.querySelector('[class*="emojiLockIcon"]')) return true;
-    return false;
-  }
-
-  /** 把锁信号固化到 data-moe-lock 上
-   * 存【当时那个表情的 id】而不是布尔: 表情面板是虚拟滚动,
-   *   React 会把同一个 button 节点复用给别的表情 —— 只存 '1' 的话滚一下
-   *   就会把没锁的表情也当成锁的, 于是本可原生发的表情反而被换成链接。 */
-  function markEmojiLock(host) {
-    if (!host || !host.getAttribute) return;
-    const sig = (host.dataset && host.dataset.id) || '1';
-    if (emojiLockedLive(host)) { host.setAttribute('data-moe-lock', sig); return; }
-    const had = host.getAttribute('data-moe-lock');
-    if (had === null) return;
-    /* 还是同一个表情 → 保留标记: 信号消失只是因为下面把 aria-disabled 摘了。
-     * 换了表情 (id 不同) → 节点被复用, 旧标记必须清掉。 */
-    if (had !== sig) host.removeAttribute('data-moe-lock');
-  }
-
-  /** 这个表情是不是被锁 (需要我们接手)
-   * 【主人报的 bug】所有「解锁了的」表情/贴纸插不出链接, 发出去对方看不到图。
-   * 【实页诊断实测 2026-09】点本服动图表情 (data-animated=true, 需 Nitro):
-   *     insertStamp = null   ← 我们的 insertIntoComposer 根本没跑 (它每次都会 stamp)
-   *     输入框只多了 12 个字符 ← CDN 链接 60+ 字符, 那是 Discord 自己插的 :name:
-   *     ariaDisabled = null  ← 锁信号不在了
-   *   → emojiLocked() 返回 false, 我们根本没接手, 文本形式服务端不解析。
-   * 【自己担的锅】unlockEmoji() 每 1.2s + 每次 DOM 变动都跑
-   *   removeAttribute('aria-disabled') —— 而 aria-disabled 正是这里最主要的锁信号。
-   *   面板一渲染它就被我们自己擦掉, 等主人点下去时已无从判断。
-   *   (剩下两条: 按钮内 emojiLockIcon —— 实测 hasLockIcon=false;
-   *    NitroLocked 分区 —— 本服表情不在里面。)
-   * 【修法】固化在前、擦除在后: 先把锁信号连同表情 id 写进 data-moe-lock,
-   *   再摘 aria-disabled。判定时优先读这个标记, 读不到才看实时信号。
-   *   同时给诊断加了 data-hijack (take/free/no-id/lottie), 下次实页一眼就能看出
-   *   到底有没有接管, 不用再从 insertStamp 是空倒推。 */
-  function emojiLocked(host) {
-    /* 【首选 Discord 自己的结论】fiber 里的 isLocked 是它算好的 (外服/跳服使用/
-     * 动图要会员/角色限制全在里面); 拿不到才退到下面的 DOM 猜法。 */
-    const info = tileLockInfo(host);
-    if (info && info.locked !== undefined) return info.locked;
-    if (!host) return false;
-    const mark = host.getAttribute && host.getAttribute('data-moe-lock');
-    if (mark !== null && mark !== undefined) {
-      const sig = (host.dataset && host.dataset.id) || '1';
-      if (mark === sig) return true;
-    }
-    return emojiLockedLive(host);
-  }
   function hijackEmojiClicks() {
     try {
       document.addEventListener('click', (e) => {
@@ -2561,19 +2127,19 @@
            *   一条 GUILD_CREATE 都没有 (g=0), 而那套 DOM 猜法把 isLocked=false 的
            *   本服静态表情当成锁着 → 好好的表情被换成链。所以 fiber 拿不到时
            *   才退回旧猜法 + 网关旁证。 */
-          const info = tileLockInfo(host);
-          if (info && info.locked !== undefined) {
-            if (!info.locked) { stamp('hijack', 'emoji:free:dc'); return; }  // 能用 → 交回原生
-          } else if (!emojiLocked(host) && gwState('emoji', id) !== 'foreign') {
-            stamp('hijack', 'emoji:free'); return;
-          }
-          const animated = info ? !!info.emoji.animated : host.getAttribute('data-animated') === 'true';
+          /* 【一律接手，不看锁没锁】主人要的就是「提取链接、以链接形式发送」。
+           * data-id 存在 = 这是一颗自定义表情 (标准 unicode emoji 没有 id) → 接手。 */
+          const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
           stamp('hijack', 'emoji:take' + (animated ? ':gif' : ''));
           insertIntoComposer(linkText(emojiCdnUrl(id, animated)) + ' ').catch(() => {});   // 不弹 toast (主人要求)
           if (!e.shiftKey) closeExpressionPicker();   // Shift 连着挑 → 留着面板
-        } catch (err) {}
+        } catch (err) {
+          /* 绝不能让异常打断 Discord —— 但必须留痕: 这一层静默吞掉过
+           * 「声明被误删」的 ReferenceError, 17 条用例齐红且日志一条没有。 */
+          stamp('hijack', 'throw:' + String((err && err.message) || err).slice(0, 36));
+        }
       }, true);
     } catch (e) {}
   }
@@ -2721,14 +2287,7 @@
       /* 名单不需要每轮都重扫 (80 条消息的 DOM), 2.4s 一次就够;
        * chip 转换很轻 (输入拢一共几张), 每轮都跑。 */
       emoTick = (emoTick + 1) % 2;
-      gwWarmAll();                                    // 面板/输入框里的 id 暖好 → 点击时同步出结论
-      if (emoTick === 0) {
-        scanEmojiRender();
-        addCopyButtons();                                 // 贴纸/表情的复制钮
-        harvestDescriptors();                             // 收 Discord 自己的表情实体与锁定结论
-        stamp('gw', 'g=' + gwStats.g + ' e=' + gwStats.e + ' s=' + gwStats.s +
-          (gwStats.p >= 0 ? ' nitro=' + gwStats.p : '') + (gwSettled ? '' : ' booting'));
-      }
+      if (emoTick === 0) addCopyButtons();              // 复制钮不必每轮重扫 DOM
       convertBrokenEmojiChips();
     } catch (e) { stamp('err', 'loop:' + e.message); }
     setTimeout(loop, 1200);

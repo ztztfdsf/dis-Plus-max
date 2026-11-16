@@ -105,7 +105,12 @@ server.listen(0, '127.0.0.1', () => {
     try { child.kill(); } catch (e) {}
     server.close();
 
-    if (!results) { console.error('✗ ' + (RUN_TIMEOUT_MS / 1000) + 's 内没收到结果 (页面脚本可能早退)'); process.exit(1); }
+    if (!results) {
+      console.error('✗ ' + (RUN_TIMEOUT_MS / 1000) + 's 内没收到结果 (页面脚本可能早退)');
+      /* 超时时也把页面日志倒出来 —— 不然报错被吞掉, 只能靠猜 */
+      if (logs.length) { console.log('── 页面日志 (超时) ──'); logs.forEach((l) => console.log('  ' + l)); }
+      process.exit(1);
+    }
     let pass = 0, fail = 0;
     for (const r of results) {
       if (r.pass) { pass++; console.log('  ✓ ' + r.name + (r.extra && !/^\(信息\)/.test(r.name) ? '   [' + r.extra + ']' : '')); }

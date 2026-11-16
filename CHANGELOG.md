@@ -7,6 +7,46 @@ Firefox 用非持久 event page），油猴版则是同一份内核换成 `GM_*`
 
 ---
 
+## v3.7.14 — 不再判可用性：自定义表情一律提取图链、以链接形式发送
+
+主人这句话把整套门禁判了死刑：**「不对啊，就是让你提取表情链接，然后以网址链接形式发送，不是要走原生上的路线，就像表情栏锁上表情解锁发送一样。」**
+
+规则塌缩成一条：**输入框里出现自定义表情的 chip（带 `data-id` + `alt=":name:"`）→ 一律原地换成 `[. ](图链)`**；表情面板里点格子（带 `data-id`）→ 一律插 `[. ](图链)`。不判「能不能用」、不走原生、不看会员。标准 unicode 表情没有 `data-id`，天然不碰。
+
+### 删掉的东西（约 250 行 + 一个页面级钩子）
+
+| 删除 | 原本是干什么的 |
+|---|---|
+| `probeUsable` / `useVerdict` / `probeTries` / 面板搜索探针 | 用面板搜索结果判「库里给不给我用」 |
+| `tileLockInfo` / `fiberEmojiBag` / `emojiUnusable` / `emojiEnt` / `harvestDescriptors` | 从 React fiber 读 Discord 的 `isLocked` 与表情实体 |
+| `markEmojiLock` / `emojiLocked` / `emojiLockedLive` / `data-moe-lock` | 猜 DOM 锁标记（曾把本服表情误伤） |
+| `scanEmojiRender` / `emoGood` / `emoBroken` | 从已渲染消息里学可用性 |
+| hook.js 的**网关探针**（包页面 `JSON.parse`、`GUILD_CREATE` 集合、`__moeGw`、`data-gw`）+ content 侧客户端 | 按「我加入的服务器」集合判外服 |
+
+**副作用一起消失**：不再为了探测而打开表情面板打字 → **零可见副作用**；不再有任何误判空间；
+不再往页面的 `JSON.parse` 上挂钩子（footprint 更小，也消除了「顶掉别人的 JSON.parse」这类风险）。
+产物 310.3 KB → **281.7 KB**。
+
+### 这一轮被用例抓出来的三个机制问题（已固化成规则）
+
+1. **删代码时删掉了活着的声明**：`composerChips()` / `emoTried` / `emoTick` 跟在被删的块里一起没了
+   → 17 条用例齐红。已把「两条选择器通道都必须留」写进 `composerChips` 的注释。
+2. **`try { … } catch {}` 会静默咽掉 ReferenceError**：这就是为什么红了 17 条却**一条日志都没有**。
+   现在接手监听器的 catch 会把异常打到诊断面板（`data-hijack=throw:…`）——
+   「绝不能影响 Discord」和「必须留痕」不该互相牺牲。
+3. runner 补了两处：async 主脚本的报错走 `unhandledrejection`（原来只挂 `error`，挂死 90 秒毫无线索）；
+   `ok()` 每条即时倒一条进度，超时时能看出挂在第几条之后。
+
+### 一次真实事故记录（不掩盖）
+
+改版本号时用了一段 Python 写文件，`encoding` 参数传错抛异常，但文件在 `'w'` 打开的瞬间已被截断
+→ `manifest.json` 变 0 字节。靠 git 恢复（`git checkout -- manifest.json`），零损失。
+教训：**改文件优先用编辑工具的精确替换，不要拿 shell 里的 python 现场拼**（本项目铁律 §4 的同一家族）。
+
+验证：仿真台 **53 条全绿**（新增：三张 chip 全转且各就各位、只带 `class="emoji"+data-id` 的旧形态也扫到、
+动图/静态格子一律插链、无 `data-id` 的格子不接手、**门禁 API 一个都不剩**的拆除确认、
+hook 不再碰 `JSON.parse`）；算法单测 64/64。
+
 ## v3.7.13 — 通杀的最后一环：面板搜索当神谕（复制的别人的表情也吃下）
 
 主人这一条把判据逼到终局：**「在聊天中直接复制外服表情依旧没有复制成链接，为什么？」**

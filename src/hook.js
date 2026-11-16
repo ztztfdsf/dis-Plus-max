@@ -1,4 +1,4 @@
-/* ══════════════════════════════════════════════════════════════════
+﻿/* ══════════════════════════════════════════════════════════════════
  * MoeGuard 喵图混淆 —— 页面内上传拦截 (MAIN world, document_start) v1.5
  *
  * 关键认知 (2026 Discord 实测):
@@ -41,6 +41,53 @@
   function log(obj) {
     try { window.postMessage(Object.assign({ __moe: 1 }, obj), '*'); } catch (e) {}
   }
+
+  /* ---------- fiber 挖掘 (主世界专属能力, 隔离世界看不见 __reactFiber$) ----------
+   * 【为什么在这】content.js 跑在 ISOLATED 世界, Chrome 每个世界有独立 DOM wrapper,
+   * React 挂的 __reactFiber$ 只在主世界可枚举 —— 实页实锢 2026-11-16:
+   * content.js 里同款代码永远拿不到 fiber (Object.keys 为空), 而主世界
+   * 同代码 depth 13 就命中 <a:fxxkpig:id>。所以 fiber 读取放这,
+   * content.js 用 moeFibReq/moeFibRes 消息同步请求。
+   * DOM 节点不能跨消息序列化 → 用「标记法」: content 先给目标 img 打 data-moe-fibq,
+   * 主世界 querySelector 找到它再挖。 */
+  function digContentToken(el) {
+    try {
+      const reTok = /<a?:[a-zA-Z0-9_]{2,64}:[0-9]{15,25}>/;
+      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
+      let f = fk ? el[fk] : null;
+      for (let i = 0; i < 24 && f; i++) {
+        for (const bag of [f.memoizedProps, f.pendingProps]) {
+          if (!bag || typeof bag !== 'object') continue;
+          for (const k of Object.keys(bag)) {
+            const v = bag[k];
+            if (typeof v === 'string' && reTok.test(v)) return v;
+            if (!v || typeof v !== 'object') continue;
+            for (const kk of Object.keys(v)) {
+              const vv = v[kk];
+              if (typeof vv === 'string' && reTok.test(vv)) return vv;
+            }
+          }
+        }
+        f = f.return;
+      }
+    } catch (e) {}
+    return null;
+  }
+  window.addEventListener('message', (e) => {
+    try {
+      if (!e.data || e.data.__moe !== 1) return;
+      /* 隔离世界要挖某颗表情的原始 content: 标记 → 主世界找到 → 挖 → 回包
+       * (标记在 img 或字面 span 上都行) */
+      if (e.data.moeFibReq) {
+        /* 标记带 seq: 同帧多颗各自挖各自的, 不再单标记撞车 (2026-11-16
+         * 单标记版把多图请求串成乱马, 动图全被判错) */
+        const q = document.querySelector('[data-moe-fibq="' + String(e.data.moeFibReq) + '"]');
+        const content = q ? digContentToken(q) : null;
+        try { if (q) q.removeAttribute('data-moe-fibq'); } catch (err) {}
+        log({ moeFibRes: e.data.moeFibReq, content: content });
+      }
+    } catch (err) {}
+  });
 
   /* ---------- 上传地址识别 ---------- */
   function isUploadUrl(u) {

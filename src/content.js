@@ -2125,7 +2125,7 @@
       (document.head || document.documentElement).appendChild(st);
     } catch (e) {}
   }
-  function ensureCopyButton(host, url) {
+  function ensureCopyButton(host, url, fromFib) {
     if (!host || !url || host.querySelector(':scope > .moe-copy')) return;
     try {
       const cs = window.getComputedStyle ? getComputedStyle(host) : null;
@@ -2137,6 +2137,7 @@
       b.textContent = '🔗';
       b.title = '复制为 [. ](链接) 格式';
       b.setAttribute('data-moe-url', url);
+      if (fromFib) b.setAttribute('data-moe-src', 'fib');
       b.addEventListener('click', (ev) => {
         ev.preventDefault();
         ev.stopPropagation();                 // 不让 Discord 与我们的接手看见
@@ -2155,38 +2156,48 @@
    * 动图被渲染成 .webp 静帧, 按 src 判就会把动图复制成静态图 ——
    * 2026-11-16 主人实测: 复制动图拿到 webp 而不是 gif。原始 content 里
    * `<a:名字:id>` 的 a: 才是铁证。 */
-  function rawContentOf(el) {
+  /** 【主世界代挖】隔离世界看不见 __reactFiber$ (Chrome 独立 DOM wrapper) ——
+   * 实锢 2026-11-16: 本函数曾在隔离世界永远返回 null, 动图全被复制成 webp。
+   * 现在打标记发给 hook.js (MAIN world) 挖, 同步等回包。 */
+  const fibWaiters = new Map();
+  let fibSeq = 0;
+  window.addEventListener('message', (e) => {
     try {
-      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
-      let f = fk ? el[fk] : null;
-      const reTok = /<a?:[a-zA-Z0-9_]{2,64}:[0-9]{15,25}>/;
+      if (!e.data || e.data.__moe !== 1 || typeof e.data.moeFibRes !== 'number') return;
+      const w = fibWaiters.get(e.data.moeFibRes);
+      if (w) { fibWaiters.delete(e.data.moeFibRes); clearTimeout(w.timer); w.resolve(e.data.content || null); }
+    } catch (err) {}
+  });
+  function rawContentOf(el) {
+    return new Promise((resolve) => {
+      try {
+        const seq = ++fibSeq;
+        const timer = setTimeout(() => { fibWaiters.delete(seq); resolve(null); }, 600);
+        fibWaiters.set(seq, { resolve, timer });
+        el.setAttribute('data-moe-fibq', String(seq));
+        window.postMessage({ __moe: 1, moeFibReq: seq }, '*');
+      } catch (e) { resolve(null); }
+    });
+  }
+  /** 字面 `:名字:` 的 span → 从同条消息的原始 content 里找回 <a?:名字:id>
+   * (同步版: 给仿真台/诊断用; 线上异步版见 rawEmojiTokenAsync) */
+  function rawEmojiToken(span, name) {
+    // 同步旧实现保留给非扩展分支 (无 hook 通道时不至于全砸):
+    try {
+      const fk = Object.keys(span).find((k) => k.indexOf('__reactFiber$') === 0);
+      if (!fk) return null;
+      let f = span[fk];
+      const re2 = new RegExp('<a?:' + name + ':([0-9]{15,25})>');
       for (let i = 0; i < 20 && f; i++) {
-        for (const bag of [f.memoizedProps, f.pendingProps, f.stateNode && f.stateNode.props]) {
-          if (!bag || typeof bag !== 'object') continue;
-          for (const k of Object.keys(bag)) {
-            const v = bag[k];
-            if (typeof v === 'string' && reTok.test(v)) return v;
-            /* 真 Discord 把它放在对象里: props.baseMessage.content
-             * (实页取证 f12.baseMessage.content = "<:pigpig:1507030922300620890>") */
-            if (!v || typeof v !== 'object') continue;
-            for (const kk of Object.keys(v)) {
-              const vv = v[kk];
-              if (typeof vv === 'string' && reTok.test(vv)) return vv;
-            }
-          }
+        const bag = f.memoizedProps;
+        if (bag && typeof bag === 'object') {
+          const c = typeof bag.content === 'string' ? bag.content : null;
+          if (c && re2.test(c)) return { id: re2.exec(c)[1], animated: c.indexOf('<a:' + name + ':') >= 0 };
         }
         f = f.return;
       }
     } catch (e) {}
     return null;
-  }
-  /** 字面 `:名字:` 的 span → 从同条消息的原始 content 里找回 <a?:名字:id> */
-  function rawEmojiToken(span, name) {
-    const c = rawContentOf(span);
-    if (!c) return null;
-    const m = new RegExp('<a?:' + name + ':([0-9]{15,25})>').exec(c);
-    if (!m) return null;
-    return { id: m[1], animated: c.indexOf('<a:' + name + ':') >= 0 };
   }
 
   function addCopyButtons() {
@@ -2202,14 +2213,20 @@
        * 动图被 Discord 渲染成 .webp 静帧, 按 src 判就把动图复制成静态图
        * (拿到 webp 而不是 gif)。原始 content 的 <a:名字:id> 才是铁证;
        * fiber 里找不到 content 时才退回 src 判定 (聊胜于无)。 */
-      for (const im of document.querySelectorAll('[class*="messageContent_"] img[data-type="emoji"][data-id]')) {
+      const emojis3 = document.querySelectorAll('[class*="messageContent_"] img[data-type="emoji"][data-id]');
+      for (const im of emojis3) {
         const host = im.parentElement;
         if (!host || !host.appendChild) continue;
-        const c3 = rawContentOf(im);
-        const animated = c3
-          ? new RegExp('<a:[a-zA-Z0-9_]+:' + im.dataset.id + '>').test(c3)
-          : /\.gif([?#]|$)/i.test(String(im.src));
-        ensureCopyButton(host, emojiCdnUrl(im.dataset.id, animated));
+        /* 防重入: 用【带标记的钮】判定 —— 钮一旦用主世界 content 算过就不再重算;
+         * 但旧版(或 fallback)挂的 webp 钮没带标记, 下一轮还要纠偏成 gif。 */
+        const old3 = host.querySelector(':scope > .moe-copy');
+        if (old3 && old3.getAttribute('data-moe-src') === 'fib') continue;
+        const id3 = im.dataset.id;
+        const fallback = () => { try { ensureCopyButton(host, emojiCdnUrl(id3, /\.gif([?#]|$)/i.test(String(im.src)))); } catch (e) {} };
+        rawContentOf(im).then((c3) => {
+          const animated = c3 ? new RegExp('<a:[a-zA-Z0-9_]+:' + id3 + '>').test(c3) : /\.gif([?#]|$)/i.test(String(im.src));
+          try { ensureCopyButton(host, emojiCdnUrl(id3, animated), !!c3); } catch (e) { fallback(); }
+        }).catch(fallback);
       }
       /* ④ 渲染成字面 `:名字:` 的外服表情 —— Discord 自己解析不了它, 正是「发不出去」
        * 那一类。它不给 data-id, 但同条消息的原始 content 里有完整 token:
@@ -2222,8 +2239,19 @@
           const m = /^:([a-zA-Z0-9_]{2,64}):$/.exec(String(sp.textContent || '').trim());
           if (!m) continue;
           if (sp.querySelector(':scope > .moe-copy')) continue;
-          const tok = rawEmojiToken(sp, m[1]);
-          if (tok) ensureCopyButton(sp, emojiCdnUrl(tok.id, tok.animated));
+          /* 主世界异步挖 (隔离世界看不见 fiber); 等不到就什么都不做 (不猜) */
+          const seqQ = ++fibSeq;
+          sp.setAttribute('data-moe-fibq', String(seqQ));
+          const pQ = new Promise((resolve) => {
+            const timer = setTimeout(() => { fibWaiters.delete(seqQ); resolve(null); }, 600);
+            fibWaiters.set(seqQ, { resolve, timer });
+            window.postMessage({ __moe: 1, moeFibReq: seqQ }, '*');
+          });
+          pQ.then((c4) => {
+            if (!c4) return;
+            const reQ = new RegExp('<a?:' + m[1] + ':([0-9]{15,25})>').exec(c4);
+            if (reQ) ensureCopyButton(sp, emojiCdnUrl(reQ[1], c4.indexOf('<a:' + m[1] + ':') >= 0));
+          }).catch(() => {});
         }
       }
       /* ⑤ 消息里已经发出来的贴纸 —— 这是「复制别人的贴纸」那条路, 保留 */

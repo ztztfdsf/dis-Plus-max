@@ -594,7 +594,7 @@
   litNoId.textContent = ':nowhere_emote:';
   litNoId.__reactFiber$harness = { memoizedProps: { baseMessage: { content: '纯文本没有 token' } }, return: null };
   msgbox.appendChild(litNoId);
-  await sleep(3200);                                  // 等 addCopyButtons 跑一轮
+  await sleep(5000);                                  // 等 addCopyButtons 跑一轮 (rawContentOf 异步走主世界, 多留一拍)
   const pillImg = imgA1.parentElement.querySelector(':scope > .moe-copy');   // 钮挂在各自韵 emojiContainer 里, 字面形态的钮在 span 里
   const pillLit = litSpan.querySelector(':scope > .moe-copy');
   ok('【动图被静帧化仍判动图】原始 content <a:…> 是铁证, 渲染 src 是 .webp 也给 .gif 链',

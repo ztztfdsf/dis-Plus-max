@@ -54,7 +54,7 @@
 
 ```bash
 node build-user.js        # → dist/moeguard.user.js
-node dev/run.js           # → 真 Chrome 跑 62 条验收用例（改完 src/ 要先跑上面那行）
+node dev/run.js           # → 真 Chrome 跑 63 条验收用例（改完 src/ 要先跑上面那行）
 node tests/core.test.js   # → 上游 64 条算法单测（源码没动，必然全绿）
 ```
 

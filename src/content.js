@@ -2104,30 +2104,28 @@
       host.appendChild(b);
     } catch (e) {}
   }
-  /** 字面 `:名字:` 的 span → 从同条消息的原始 content 里找回 <a?:名字:id> */
-  function rawEmojiToken(span, name) {
+  /** 从元素往上挖它所在消息的原始 content (fiber 上 baseMessage.content 等)。
+   * 【动图判定的权威源】Discord 渲染出来的 img.src 不可信: 主人关了动画播放时
+   * 动图被渲染成 .webp 静帧, 按 src 判就会把动图复制成静态图 ——
+   * 2026-11-16 主人实测: 复制动图拿到 webp 而不是 gif。原始 content 里
+   * `<a:名字:id>` 的 a: 才是铁证。 */
+  function rawContentOf(el) {
     try {
-      const fk = Object.keys(span).find((k) => k.indexOf('__reactFiber$') === 0);
-      let f = fk ? span[fk] : null;
-      const re2 = new RegExp('<a?:' + name + ':([0-9]{15,25})>');
+      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
+      let f = fk ? el[fk] : null;
+      const reTok = /<a?:[a-zA-Z0-9_]{2,64}:[0-9]{15,25}>/;
       for (let i = 0; i < 20 && f; i++) {
         for (const bag of [f.memoizedProps, f.pendingProps, f.stateNode && f.stateNode.props]) {
           if (!bag || typeof bag !== 'object') continue;
           for (const k of Object.keys(bag)) {
             const v = bag[k];
-            if (typeof v === 'string') {
-              const m = re2.exec(v);
-              if (m) return { id: m[1], animated: v.indexOf('<a:' + name + ':') >= 0 };
-              continue;
-            }
+            if (typeof v === 'string' && reTok.test(v)) return v;
             /* 真 Discord 把它放在对象里: props.baseMessage.content
              * (实页取证 f12.baseMessage.content = "<:pigpig:1507030922300620890>") */
             if (!v || typeof v !== 'object') continue;
             for (const kk of Object.keys(v)) {
               const vv = v[kk];
-              if (typeof vv !== 'string' || vv.indexOf('<:') < 0) continue;
-              const m = re2.exec(vv);
-              if (m) return { id: m[1], animated: vv.indexOf('<a:' + name + ':') >= 0 };
+              if (typeof vv === 'string' && reTok.test(vv)) return vv;
             }
           }
         }
@@ -2135,6 +2133,14 @@
       }
     } catch (e) {}
     return null;
+  }
+  /** 字面 `:名字:` 的 span → 从同条消息的原始 content 里找回 <a?:名字:id> */
+  function rawEmojiToken(span, name) {
+    const c = rawContentOf(span);
+    if (!c) return null;
+    const m = new RegExp('<a?:' + name + ':([0-9]{15,25})>').exec(c);
+    if (!m) return null;
+    return { id: m[1], animated: c.indexOf('<a:' + name + ':') >= 0 };
   }
 
   function addCopyButtons() {
@@ -2145,11 +2151,18 @@
        * 面板格子的职责只剩一件事: 点了就把 [. ](图链) 插进输入框并收面板。
        * 聊天里已发出的表情/贴纸仍然有钮 (③④⑤) —— 那才是「复制别人的外服表情/贴纸」。 */
       /* ③ 消息里已经发出来的表情与贴纸 —— 别人发的外服表情也能一键拿链
-       * (主人: 「在聊天中直接复制外服表情」就该直接是链接格式) */
+       * (主人: 「在聊天中直接复制外服表情」就该直接是链接格式)
+       * 【动图看原始 content, 不看渲染出来的 src】主人 2026-11-16 实测: 关了动画播放时
+       * 动图被 Discord 渲染成 .webp 静帧, 按 src 判就把动图复制成静态图
+       * (拿到 webp 而不是 gif)。原始 content 的 <a:名字:id> 才是铁证;
+       * fiber 里找不到 content 时才退回 src 判定 (聊胜于无)。 */
       for (const im of document.querySelectorAll('[class*="messageContent_"] img[data-type="emoji"][data-id]')) {
         const host = im.parentElement;
         if (!host || !host.appendChild) continue;
-        const animated = /\.gif([?#]|$)/i.test(String(im.src));
+        const c3 = rawContentOf(im);
+        const animated = c3
+          ? new RegExp('<a:[a-zA-Z0-9_]+:' + im.dataset.id + '>').test(c3)
+          : /\.gif([?#]|$)/i.test(String(im.src));
         ensureCopyButton(host, emojiCdnUrl(im.dataset.id, animated));
       }
       /* ④ 渲染成字面 `:名字:` 的外服表情 —— Discord 自己解析不了它, 正是「发不出去」

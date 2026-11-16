@@ -571,11 +571,34 @@
   /* ---------- 14. 主人从始至终要的那件事: 聊天里别人发的外服表情 → 复制成链接 ---------- */
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
     writeText: (x) => { window.__copyLog = window.__copyLog || []; window.__copyLog.push(x); return Promise.resolve(); } } });
-  /* (a) 渲染成图的: Discord 给了 data-id */
+  /* (a) 渲染成图的: Discord 给了 data-id —— 动图两条夹具:
+   *     a1 = 原始 content 里是 <a:…> (真动图), 但渲染 src 被 Discord 换成了 .webp 静帧
+   *          (主人关了动画播放时就是这样 —— 2026-11-16 实测: 复制动图拿到 webp 而不是 gif)
+   *     a2 = 原始 content 里是 <:…> (真静态), src 也是 .webp —— 不能因为 src 像 webp 就误判静态 */
   const msgbox = document.getElementById('otherbox');
-  msgbox.innerHTML =
-    '<img class="emoji" data-type="emoji" data-id="1900000000000000021" alt=":foreign_img_emote:" ' +
-    'src="https://cdn.discordapp.com/emojis/1900000000000000021.gif?size=44">';
+  msgbox.__reactFiber$harness = {
+    memoizedProps: { baseMessage: { content: '看这个 <a:foreign_gif_emote:1900000000000000021> 好笑' } },
+    pendingProps: null, return: null,
+  };
+  const imgA1 = document.createElement('img');
+  imgA1.className = 'emoji';
+  imgA1.setAttribute('data-type', 'emoji');
+  imgA1.dataset.id = '1900000000000000021';
+  imgA1.alt = ':foreign_gif_emote:';
+  imgA1.src = 'https://cdn.discordapp.com/emojis/1900000000000000021.webp?size=44&animated=false';
+  const statImg = document.createElement('img');
+  statImg.className = 'emoji';
+  statImg.setAttribute('data-type', 'emoji');
+  statImg.dataset.id = '1900000000000000022';
+  statImg.alt = ':foreign_static_emote:';
+  statImg.src = 'https://cdn.discordapp.com/emojis/1900000000000000022.webp?size=44';
+  /* 真页形态: 每张表情在自己韵 span.emojiContainer_* 里 (两图不能共用宿主, 否则断言抓错钮);
+   * img 自带 fiber, return 链指向消息组件 —— rawContentOf 就是从这条链找到 baseMessage.content */
+  const wrap1 = document.createElement('span'); wrap1.className = 'emojiContainer_h'; wrap1.appendChild(imgA1);
+  const wrap2 = document.createElement('span'); wrap2.className = 'emojiContainer_h'; wrap2.appendChild(statImg);
+  msgbox.appendChild(wrap1); msgbox.appendChild(wrap2);
+  imgA1.__reactFiber$harness = { memoizedProps: null, pendingProps: null, return: msgbox.__reactFiber$harness };
+  statImg.__reactFiber$harness = { memoizedProps: null, pendingProps: null, return: msgbox.__reactFiber$harness };
   /* (b) 渲染成字面 :名字: 的: Discord 自己解析不了它 (= 正是发不出去那一类),
    *     id 只能从同条消息的原始 content 里找回 (实页取证 fiber: baseMessage.content) */
   const litSpan = document.createElement('span');
@@ -591,11 +614,15 @@
   litNoId.__reactFiber$harness = { memoizedProps: { baseMessage: { content: '纯文本没有 token' } }, return: null };
   msgbox.appendChild(litNoId);
   await sleep(3200);                                  // 等 addCopyButtons 跑一轮
-  const pillImg = msgbox.querySelector(':scope > .moe-copy');   // 图形态的钮挂在消息容器上, 字面形态的钮在 span 里
+  const pillImg = imgA1.parentElement.querySelector(':scope > .moe-copy');   // 钮挂在各自韵 emojiContainer 里, 字面形态的钮在 span 里
   const pillLit = litSpan.querySelector(':scope > .moe-copy');
-  ok('【图形态】消息里渲染成图的外服表情长出 🔗',
-    !!pillImg && (pillImg.getAttribute('data-moe-url') || '').indexOf('emojis/1900000000000000021.gif?size=96') >= 0,
+  ok('【动图被静帧化仍判动图】原始 content <a:…> 是铁证, 渲染 src 是 .webp 也给 .gif 链',
+    !!pillImg && (pillImg.getAttribute('data-moe-url') || '') === 'https://cdn.discordapp.com/emojis/1900000000000000021.gif?size=96',
     pillImg ? pillImg.getAttribute('data-moe-url') : 'no pill');
+  const pillStat = statImg.parentElement.querySelector(':scope > .moe-copy');
+  ok('【不误判】原始 content 是 <:…> (真静态) → .webp 链, 不会因为 src 像 webp 就错',
+    !!pillStat && pillStat.getAttribute('data-moe-url') === 'https://cdn.discordapp.com/emojis/1900000000000000022.webp?size=96',
+    pillStat ? pillStat.getAttribute('data-moe-url') : 'no pill');
   ok('【字面 :名字: 形态】按原始 content 找回 id 后也长出 🔗',
     !!pillLit && pillLit.getAttribute('data-moe-url') === 'https://cdn.discordapp.com/emojis/1397468110776172654.webp?size=96',
     (pillLit ? pillLit.getAttribute('data-moe-url') : 'no pill') +

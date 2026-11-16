@@ -617,6 +617,30 @@
     })(),
     '格子数=' + document.querySelectorAll('button[data-type="emoji"]').length +
     ' 带钮的格子=' + document.querySelectorAll('button[data-type="emoji"] > .moe-copy').length);
+  /* 【真页事故回归】上一版钮挂上了却永远不浮现: 消息表情的宿主是 span.emojiContainer_*,
+   * 消息贴纸的宿主是 messageContent_*, 而浮现规则只写了 button[data-type=emoji] 与 sticker
+   * → 主人截图问「这两个外服表情你还没做?」。现在由我们自己给宿主打 moe-copy-host 标记。 */
+  ok('【浮现回归】每个钮的宿主都带 moe-copy-host 标记 (不靠 Discord 类名)',
+    (function () {
+      const pills = [...document.querySelectorAll('.moe-copy')];
+      if (!pills.length) return false;
+      return pills.every((x) => { const h = x.parentElement; return h && h.classList.contains('moe-copy-host'); });
+    })(),
+    '钮数=' + document.querySelectorAll('.moe-copy').length +
+    ' 带标记的宿主=' + document.querySelectorAll('.moe-copy-host').length);
+  ok('【浮现回归】.moe-copy-host:hover 这条规则真的存在于样式里, 且消息宿主能匹配它',
+    (function () {
+      const css = [...document.querySelectorAll('style')].map((x) => x.textContent).join(String.fromCharCode(10));
+      if (css.indexOf('.moe-copy-host:hover') < 0) return false;
+      const host = document.querySelector('.moe-copy').parentElement;
+      return host.matches('.moe-copy-host:hover') === false && host.matches('.moe-copy-host') === true;
+    })(), '见上');
+  ok('【真页形态】消息里的表情 (宿主是 span 容器) 也有钮',
+    (function () {
+      const im = document.querySelector('#otherbox img[data-type="emoji"]');
+      const h = im && im.parentElement;
+      return !!(h && h.querySelector(':scope > .moe-copy') && h.classList.contains('moe-copy-host'));
+    })(), 'ok');
   ok('【钮位置】复制钮在左上角且默认不浮现 (悬停才出现, 不挡图)',
     (function () {
       const css = [...document.querySelectorAll('style')].map((x) => x.textContent).join(String.fromCharCode(10));

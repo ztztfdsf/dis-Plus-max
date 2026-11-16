@@ -2059,6 +2059,11 @@
     'padding:0 3px;border:0;border-radius:3px;background:rgba(0,0,0,.72);color:#fff;' +
     'font:10px system-ui,sans-serif;line-height:16px;cursor:pointer;opacity:0;pointer-events:none}' +
     /* 【不挡图】默认完全不浮现, 悬停到格子/贴纸才出来 —— 主人要求「不要挡住表情贴纸」 */
+    /* 【宿主自己带标记 —— 别猜 Discord 的类名】上一版只写了 button[data-type=emoji]
+     * 与 sticker 两种宿主, 而消息里表情的宿主是 span.emojiContainer_*, 消息里贴纸的
+     * 宿主是 messageContent_* —— 两条都不匹配 → 钮挂上了却【永远不浮现】(主人截图
+     * 问「这两个外服表情你还没做?」就是这个)。现在由 ensureCopyButton 自己加类。 */
+    '.moe-copy-host:hover>.moe-copy,.moe-copy-host:hover .moe-copy,' +
     'button[data-type="emoji"]:hover>.moe-copy,[data-type="sticker"]:hover>.moe-copy,' +
     '[class*="sticker"]:hover .moe-copy{opacity:1;pointer-events:auto}' +
     '.moe-copy:hover{background:#1e6fd9;opacity:1;pointer-events:auto}' +
@@ -2077,6 +2082,7 @@
     try {
       const cs = window.getComputedStyle ? getComputedStyle(host) : null;
       if (!cs || cs.position === 'static') host.style.position = 'relative';
+      try { host.classList.add('moe-copy-host'); } catch (e) {}   // 浮现规则认这个, 不认 Discord 的类名
       const b = document.createElement('button');
       b.className = 'moe-copy';
       b.type = 'button';

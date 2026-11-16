@@ -7,6 +7,54 @@ Firefox 用非持久 event page），油猴版则是同一份内核换成 `GM_*`
 
 ---
 
+## v3.7.16 — 修一个「做了但看不见」：消息里的复制钮永远不浮现
+
+主人发了张截图：**「这两个外服表情你还没做？通杀方式」**
+
+实页只读一枪就把真相拉出来了：
+
+```
+ver=3.7.15  boxes=38  imgs=9  pills=9      ← 钮其实全挂上了
+rows[0]: :pigpig:  host=SPAN.emojiContainer_lTEMT6
+         pillOpacity=0  pillPE=none         ← 但算出来就是不可见、不可点
+```
+
+### 根因
+
+浮现规则只写了两种宿主：
+
+```css
+button[data-type="emoji"]:hover > .moe-copy,   /* 表情栏格子 ✓ */
+[data-type="sticker"]:hover > .moe-copy,       /* 贴纸格 ✓ */
+[class*="sticker"]:hover .moe-copy { ... }     /* 贴纸内部 ✓ */
+```
+
+而**消息里表情的宿主是 `span.emojiContainer_*`**、**消息里贴纸的宿主是 `messageContent_*`**
+—— 一条都不匹配 → 钮挂上了却**从不浮现**，看起来就是「根本没做」。
+（本质：我又去猜了 Discord 的类名，而不是自己打标记 —— 同一个错反复出现。）
+
+### 修法
+
+由 `ensureCopyButton` 自己给宿主打上 `moe-copy-host`，浮现规则只认这个标记：
+
+```css
+.moe-copy-host:hover > .moe-copy, .moe-copy-host:hover .moe-copy { opacity:1; pointer-events:auto }
+```
+
+不依赖 Discord 类名，表情格/贴纸格/消息里的表情/消息里的贴纸共用同一条仍成立的路。
+
+### 钉住的三条回归
+
+1. **每个钮的宿主都带 `moe-copy-host`**（上一版：钮数=4、带标记=0 → 直接红）
+2. `.moe-copy-host:hover` 这条规则真的在样式里，且消息宿主能匹配它
+3. 【真页形态】消息里的表情（宿主是 span 容器）也有钮
+
+另外用 `chrome_computer` 的真实鼠标悬停（CDP `Input.dispatchMouseEvent`，会真的改变 `:hover`
+状态）在真页上验一眼：悬停后 `opacity` 应从 `0` 变 `1`。
+
+验证：仿真台 **55 条全绿**；算法单测 64/64。行为没变（仍是 3.7.15 那两条：表情栏只有上锁的才插链、
+聊天里的表情复制成链接），本版只把「看不见」修成「看得见、点得中」。
+
 ## v3.7.15 — 表情栏改回去：只有上锁的用链接发；聊天里的外服表情才能复制成链接
 
 主人三句话把上一版的方向纠正过来：

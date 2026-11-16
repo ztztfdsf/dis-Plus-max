@@ -1974,6 +1974,22 @@
         el.closest('[class*="expression"]')));
     } catch (e) { return false; }
   }
+  /** 核心判断就这两下 (主人: 直接从内核, 别搞复杂):
+   * ① 格子自己 props 里的 emoji.guildId (真页实测形状: memoizedProps.children.props.emoji)
+   * ② URL /channels/<当前服id>/… —— 相同 → 交回原生 (3.7.11 手感),
+ *    不同/拿不到 → 转链 (非会员发外服必弹「仅限 Nitro」, 拦死那条路)。 */
+  function emojiGuildId(host) {
+    try {
+      const k = Object.keys(host).find((x) => x.indexOf('__reactFiber$') === 0);
+      const p = k && host[k].memoizedProps;
+      const em = p && p.children && p.children.props && p.children.props.emoji;
+      return em && em.guildId ? String(em.guildId) : '';
+    } catch (e) { return ''; }
+  }
+  function currentGuildId() {
+    try { return (/^\/channels\/(\d+)/.exec(location.pathname) || [, window.__moeGid])[1] || ''; }
+    catch (e) { return ''; }
+  }
   function hijackEmojiClicks() {
     try {
       document.addEventListener('click', (e) => {
@@ -2003,19 +2019,16 @@
           const host = emojiHost(item);
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
-          /* 【一律接手, 不看锁没锁】主人 2026-11-16 把要求重述成一句:
-           *   「我只是让你点击表情后, 自动关闭表情栏, 还要把表情换成格式链接」
-           * 【为什么不能按 isLocked 分流 —— 实页一手证据】主人点一颗外服表情,
-           *   我们读到 data-hijack=emoji:free (Discord 标它 isLocked=false) → 放行
-           *   走原生 → 当场弹出「使用 Nitro 解锁所有表情符号 / 仅限 Nitro」会员弹窗。
-           *   即【要 Nitro 的外服表情在面板里根本不标锁】, 按锁分流必然漏,
-           *   而漏掉的恰好就是主人要解决的那一类。
-           * 【接手 = preventDefault + stopPropagation(捕获阶段)】Discord 那条原生路
-           *   整段不跑 → 会员弹窗从结构上不可能出现, 不需要判断得对。 */
+          /* 表情栏回到原生优先 (主人: 对齐 3.7.11 + 没权限的转链):
+           * 本服 → 交回原生 (原生插芯片、原生收面板);
+           * 外服/判不出 → 拦死原生 + 插链 + 收面板 (防「仅限 Nitro」弹框)。 */
+          const eg = emojiGuildId(host);
+          const cg = currentGuildId();
+          if (cg && eg && eg === cg) { stamp('hijack', 'emoji:free'); return; }
           const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
-          stamp('hijack', 'emoji:take' + (animated ? ':gif' : ''));
+          stamp('hijack', (eg ? 'emoji:take:foreign' : 'emoji:take:unk') + (animated ? ':gif' : ''));
           insertIntoComposer(linkText(emojiCdnUrl(id, animated)) + ' ').catch(() => {});   // 不弹 toast (主人要求)
           if (!e.shiftKey) closeExpressionPicker();   // Shift 连着挑 → 留着面板
         } catch (err) {

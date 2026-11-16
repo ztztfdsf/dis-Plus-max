@@ -102,56 +102,56 @@ Slate 不认手改的节点，一重绘就丢，只能走它自己的事件通�
 那条依旧原样发；但它当场就在滚动条里留下了字面文本，从下一个起自动转链。
 你那个 `rin_miao_full_angry` 已经发过两次，所以现在就已经在名单里了。
 
-**四、判据换成网关集合 —— 全部外服表情/贴纸通杀（不再只认「见过的那几个」）**
+**四、通杀的判据换到「Discord 自己算的结论」这一层**
 
-上一版的判据是「在滞动条里见过它渲染成字面文本」，那是**事后学习**：一个表情
-要先失败一次，以后才转链。主人一句「我要的是所有外服表情通杀」把它推回根上。
+主人原话：「每一个表情单独处理…而且我直接复制别人的表情，这个是已有服务器的，会直接报错没有会员，
+我希望像通杀外服表情一样通杀这个。」这一条把判据逼到了正确的层。三条战线都是实弹打的，
+**两条被打死、一条活了下来**，全部如实记在这里：
 
-内部函数这条路被实弹否掉了：webpack 一共 9044 个模块，但 Discord 的属性名被
-terser 打了——`getAllReadyEmojis` / `isUsable` / `EmojiStore` / `unsendable`
-在全部模块源码里 **0 命中**，只有 `getGuildEmoji`(2) / `stickerUnsendable`(1)
-作为字符串残留。抓内部函数就是埋版本地雷。
-
-**换了个层次：走协议。** 探针实测 Discord 的网关 dispatch 就是走页面
-`JSON.parse`，原文形如 `{"t":"MESSAGE_CREATE","s":1706,"op":0,"d":{...}}`
-（实抓到 PRESENCE_UPDATE / MESSAGE_CREATE / MESSAGE_UPDATE / SESSIONS_REPLACE /
-MESSAGE_REACTION_ADD）。而开机洪峰里的 `GUILD_CREATE` **每个我加入的服务器一条，
-自带 `emojis[]` 与 `stickers[]`** —— 这两个集合就是「我这客户端认识哪些 id」的
-权威答案：
-
-| id 在集合里 | 含义 | 处理 |
+| 候选判据 | 结果 | 一手证据 |
 |---|---|---|
-| 在 | 我服务器/我能用的 | 完全交回 Discord 原生 |
-| 不在（且洪峰已收） | 外服 | 表情格/贴纸格点击接手插 `[. ](URL)`；输入栏 chip 就地转链 |
+| ✗ 从 Discord 内部挖「可用性」函数 | **死**：webpack 9044 个模块里 `getAllReadyEmojis`/`isUsable`/`EmojiStore`/`unsendable` **0 命中**（属性名被 terser 打了） | 全模块源码扫描 |
+| ✗ 网关 `GUILD_CREATE.emojis[]/stickers[]` 集合 | **死在这台机器上**：包装器在位、实时 dispatch 也确实流过（6 秒抓到 `MESSAGE_CREATE×2`/`TYPING_START`/`PRESENCE_UPDATE`），`premium_type` 也从 `READY` 读到了（=0），**但一条 `GUILD_CREATE` 都没有** → `g=0 e=0 s=0`，判据永远停在 unknown | 实页探针 + `data-gw` |
+| ✗ 把 `<:name:id>` 当文本插进输入框，看 Discord 解析不解析回 chip | **死**：正样本（消息里已渲染成图、确定能用的 `nienie_shengjiang`）与反样本（`rin_miao_full_angry`）**都不解析**，两条都留在字面文本 → 输入框不是这个用法的神谕 | 实页 A/B，做完把输入框恢复原样 |
+| ✓ **React fiber 里 Discord 自己的判定** | **活**。表情格子的 fiber 上摆着： | 见下 |
 
-`hook.js` 在 `document_start` 包一层 `JSON.parse`（**只读对象的 `op`/`t` 两个属性，
-不做任何字符串匹配**，成本可忽略；只有 GUILD_*/READY 才走后续逻辑），把 id 收进
-两个 Set；`content.js` 侧一个缓存 + 批量暖（面板一开就把那几百个 id 问一遍，
-点击时才能同步出结论）。
+```text
+props.children.props = {
+  emoji: {guildId, id, animated, name, require_colons, available, roles, managed, version, type},
+  isLocked: false, allowAnimatedEmoji: true, size: 40, columnIndex, rowIndex }
+// 整面板的清单在同一条 fiber 的 props.emojiDescriptors[N].emoji
+```
 
-三道防误伤（都各自有用例钉住）：
+`isLocked` 是 Discord **算完**的「这条频道里我此刻能不能用它」——外服、跨服务器使用、
+动图要会员、角色限制（`roles`）全在里面，不用我自己复述它的规则。于是：
 
-1. **洪峰没完一律 unknown** —— 否则开机那几秒会把自家服务器的表情判成外服
-2. **unknown 绝不动手** —— 只有确定的 foreign 才接手
-3. **Discord 自己的可用证据优先** —— 表情见过渲染成图（`emoGood`）、贴纸见过
-   发出来成图（`stGood`）都不碰；贴纸还额外让 `stickerUnsendable` 优先
-   （实测伙伴/加成服的东西确实存在「不在我集合里但仍能用」的情形）
+- **表情格子**：`isLocked===true` 才接手（插 `[. ](图链)`）；`===false` 一律交回原生。
+  顺带修掉一个真 bug：上一版靠 `aria-disabled`/锁图标猜，实测把 `isLocked:false` 的
+  **本服静态表情当成锁着 → 好好的表情被换成链**（就是主人说的「影响其他表情」）。
+- **输入框里的 chip**：chip 自己的 fiber 也走同一条读取；再兜底
+  `emojiDescriptors` 缓存（id→`{guildId,animated,locked}`）+ `premium_type` + URL 里的
+  当前服务器：没会员且 `guildId ≠ 当前服务器` = 用不了 = 就地转链
+  ——**「复制别人服务器里我有的表情，发出去报没会员」这一类就是这么吃下的。**
+- `locked` 保持**三态**（true / false / undefined）：拿不到判定绝不当成「能用」或「不能用」，
+  未知就不动手。网关集合与旧版渲染学习退成旁证/兜底，只在 fiber 读不到时才用。
 
-**五、贴纸补上「复制为链接」钮**
+**五、贴纸：按拍板改成「只给复制钮，不再抢点击」**
 
-主人原话：「这个贴纸默认情况下是没有复制按钮的，你添加一个复制，直接复制成那个格式」。
-Discord 对贴纸**没有任何复制入口**（右键只有「复制图片」「复制消息链接」），
-想拿图链只能自己 F12。而贴纸本质就是 `media.discordapp.net` 上一张公开图
-（实测 206 OK、无需凭证）。
+主人原话：「这个贴纸默认情况下是没有复制按钮的，你添加一个复制，直接复制成那个格式」，
+追问后拍板「取消点击插入，只保留复制钮」。所以：
 
-现在这三处都长出 🔗 钮：**表情面板的表情格**、**贴纸面板的贴纸格**、
-**消息里已经发出来的贴纸**（别人发的外服贴纸也能一键拿）。点一下复制出去就是
-`[. ](https://media.discordapp.net/stickers/<id>.png?size=160)`，粘到哪都是一个点 + 图。
+- 删掉贴纸点击接手（`hijackStickerClicks` 整段移除）——能发的交回 Discord 原生发真贴纸。
+- 复制钮贴在**表情格、贴纸格、消息里已渲染出的贴纸**上；贴纸本质就是
+  `media.discordapp.net` 上一张公开图（实测 206 OK、无需凭证），Discord 自己不给任何复制入口。
+- 钮的格式就是发送格式：`[. ](https://media.discordapp.net/stickers/<id>.png?size=160)`。
+- 【位置按你说的】挪到**左上角**，而且**默认完全不浮现**（`opacity:0` + `pointer-events:none`），
+  悬停到格子/贴纸上才出现 —— 不挡表情也不挡贴纸。
+- 事件顺序坑（记下来免得再踩）：接手监听在 `document` 捕获阶段，捕获阶段一 `stopPropagation`
+  事件就饿死在钮前面 —— 所以接手监听开头先 `if (t.closest('.moe-copy')) return;` 放行。
 
-事件顺序上有个必须写下来的坑：我们的接手监听在 `document` 捕获阶段（最早），
-而 `stopPropagation()` 在捕获阶段一叫，事件就到不了钮（target）——所以两个接手
-监听开头都先 `if (t.closest('.moe-copy')) return;`，让钮自己的 click 去 stop。
-用例钉住：点钮只复制、**不会**顺手把贴纸插进输入栏。
+仿真台 41 → **59 条全绿**（新增：fiber 实体采集、`isLocked=false` 不接手回归、
+`isLocked=true` 的 chip 就地转链、贴纸点击不插入、钮在左上且默认不浮现、复制内容逐字符校验）；
+算法单测 64/64。
 
 ---
 

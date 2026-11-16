@@ -577,10 +577,7 @@
   const sFar = document.getElementById('sFar');
   const sMy = document.getElementById('sMy');
   const sSeen = document.getElementById('sSeen');
-  ui13.scanEmojiRender();                                // 把 stGood 证据拾进来
-  ok('贴纸的 veto 证据能从消息里学到 (渲染成过图的 id)',
-    ((ui13.emo || {}).stickers || []).indexOf(GW_SEEN_STICKER) >= 0,
-    JSON.stringify((ui13.emo || {}).stickers));
+  ui13.scanEmojiRender();
   await sleep(2600);                                    // 等 addCopyButtons 跑一轮
   const pill = sFar.querySelector('.moe-copy');
   ok('【贴纸复制钮】贴纸格上长出了 🔗 (Discord 自己没这个入口)', !!pill,
@@ -601,19 +598,78 @@
   const b16 = cbox13.textContent;
   sFar.click();
   await sleep(600);
-  ok('【通杀】没标 unsendable 的外服贴纸点一下也接手 (贴纸也全覆盖)',
-    cbox13.textContent !== b16 && /stickers\//.test(cbox13.textContent.slice(b16.length)),
-    JSON.stringify(cbox13.textContent.slice(b16.length, b16.length + 90)));
-  const b17 = cbox13.textContent;
-  sMy.click();
-  await sleep(400);
-  ok('自家服务器的贴纸 (在 GUILD_CREATE.stickers[] 里) 不接手', cbox13.textContent === b17,
-    JSON.stringify(cbox13.textContent.slice(b17.length, b17.length + 60)));
-  const b18 = cbox13.textContent;
-  sSeen.click();
-  await sleep(400);
-  ok('外服但消息里渲染成过图的贴纸 → stGood 挡住, 不误伤', cbox13.textContent === b18,
-    JSON.stringify(cbox13.textContent.slice(b18.length, b18.length + 60)));
+  ok('【按主人拍板】点贴纸不再往输入框插东西 (交回 Discord 原生)', cbox13.textContent === b16,
+    JSON.stringify(cbox13.textContent.slice(b16.length, b16.length + 80)));
+
+  /* ---------- 14. fiber 里的 isLocked = 唯一权威 (实页把本服表情误伤的回归) ---------- */
+  const grid14 = document.getElementById('picker-trap');
+  const mkFiberTile = (o) => {
+    const b = document.createElement('button');
+    b.setAttribute('data-type', 'emoji');
+    b.dataset.id = o.id; b.dataset.name = o.name;
+    b.setAttribute('data-animated', o.animated ? 'true' : 'false');
+    b['__reactFiber$harness'] = {
+      memoizedProps: { children: { props: {
+        emoji: { id: o.id, name: o.name, guildId: o.guild, animated: !!o.animated, require_colons: true, available: true, roles: [] },
+        isLocked: !!o.locked, allowAnimatedEmoji: o.allowAnim !== false, size: 40,
+      } } },
+      pendingProps: null, return: null,
+    };
+    grid14.appendChild(b);
+    return b;
+  };
+  /* 本服静态、isLocked=false —— 就是实页被我误伤的那一类 */
+  const dcFree = mkFiberTile({ id: '1800000000000000001', name: 'dc_free_emote', guild: '1349298998988771359' });
+  /* 锁定的 (外服/要会员) —— Discord 明说不能用 */
+  const dcLock = mkFiberTile({ id: '1800000000000000002', name: 'dc_locked_emote', guild: '9990000000000000001', animated: true, locked: true });
+  ui13.harvestDescriptors();
+  await sleep(300);
+  ok('从 fiber 收到 Discord 自己的表情实体 (带 guildId/animated)',
+    !!ui13.ents && Object.keys(ui13.ents).length >= 2 && !!ui13.ents['1800000000000000001'],
+    'entities=' + Object.keys(ui13.ents || {}).length);
+  ok('isLocked=false 的格子 → tileLockInfo 说不锁 (不再靠猜 DOM)',
+    ui13.tileLockInfo(dcFree) && ui13.tileLockInfo(dcFree).locked === false,
+    JSON.stringify(ui13.tileLockInfo(dcFree) && ui13.tileLockInfo(dcFree).locked));
+  const b19 = cbox13.textContent;
+  dcFree.click();
+  await sleep(500);
+  ok('【回归】Discord 说能用的表情 → 绝不接手 (实页曾把本服静态表情换成链)',
+    cbox13.textContent === b19, JSON.stringify(cbox13.textContent.slice(b19.length, b19.length + 70)));
+  ui13.convertBrokenEmojiChips();
+  function mkFiberChip() {
+    const im = document.createElement('img');
+    im.className = 'emoji';
+    im.setAttribute('data-type', 'emoji');
+    im.dataset.id = '1800000000000000002';
+    im.setAttribute('alt', ':dc_locked_emote:');
+    im.src = 'https://cdn.discordapp.com/emojis/1800000000000000002.gif?size=44';
+    im['__reactFiber$harness'] = { memoizedProps: { children: { props: {
+      emoji: { id: '1800000000000000002', name: 'dc_locked_emote', guildId: '9990000000000000001', animated: true, require_colons: true },
+      isLocked: true, allowAnimatedEmoji: false } } }, return: null };
+    cbox13.appendChild(im);
+    return im;
+  }
+  const lockChip = mkFiberChip();
+  cbox13.focus();
+  await sleep(2600);                       // 等一轮 loop 的 convertBrokenEmojiChips
+  ok('【通杀】chip 的 fiber 说 isLocked=true → 输入框里就地转链 (不靠网关集合)',
+    !lockChip.isConnected && /\[\. \]\(https:\/\/cdn\.discordapp\.com\/emojis\/1800000000000000002\.gif\?size=96\)/.test(cbox13.textContent),
+    cbox13.textContent.slice(-110));
+  /* 同一颗 chip 换成 isLocked=false → 不能动 */
+  const freeChip = mkFiberChip();
+  freeChip['__reactFiber$harness'].memoizedProps.children.props.isLocked = false;
+  freeChip.dataset.id = '1800000000000000001';
+  freeChip.setAttribute('alt', ':dc_free_emote2:');
+  const b20 = cbox13.textContent;
+  await sleep(2600);
+  ok('chip 能用的 (isLocked=false) → 原样留着', freeChip.isConnected && cbox13.textContent === b20,
+    '还在=' + freeChip.isConnected);
+  /* 钮在左、默认不浮现 (不挡图) */
+  const pillFar = sFar.querySelector('.moe-copy');
+  ok('【钮位置】复制钮在左上角且默认不可见 (悬停才浮现, 不挡表情贴纸)',
+    !!pillFar && /left:\s*2px/.test(document.getElementById('moe-copy-css').textContent) &&
+    !/right:\s*2px/.test(document.getElementById('moe-copy-css').textContent),
+    pillFar ? getComputedStyle(pillFar).left + '/' + getComputedStyle(pillFar).opacity : 'no pill');
 
   await report();
 })();

@@ -1044,7 +1044,7 @@
   }
   /* 调试/仿真入口。v3.7.12 之前只挂在非扩展分支上 —— 带 shim 的形态里
    * EXT 为真, 仿真台/面板就什都拿不到, 提到分支外两种形态都有。 */
-    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, scanEmojiRender, convertBrokenEmojiChips, gwWarmAll, gwState, addCopyButtons, copyText, get decisions() { return decisions.slice(); }, get cfg() { return cfg; }, get emo() { return { good: Object.keys(emoGood), broken: Object.keys(emoBroken), stickers: Object.keys(stGood), gw: gwStats, settled: gwSettled, cached: gwCache.size }; } };
+    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, scanEmojiRender, convertBrokenEmojiChips, gwWarmAll, gwState, addCopyButtons, harvestDescriptors, tileLockInfo, emojiUnusable, copyText, get entities() { return Object.keys(emojiEnt).length; }, get ents() { return emojiEnt; }, get allowAnim() { return allowAnimatedHere; }, get guild() { return currentGuildId(); }, get decisions() { return decisions.slice(); }, get cfg() { return cfg; }, get emo() { return { good: Object.keys(emoGood), broken: Object.keys(emoBroken), gw: gwStats, settled: gwSettled, cached: gwCache.size }; } };
 
   /* ---------- 移除举报入口 (主人要求: 整个 Discord 界面去掉举报) ---------- */
   const REPORT_KEYWORDS = ['report', '举报', '報告', '申告'];
@@ -1908,12 +1908,10 @@
   /** 把当前 DOM 上能看到的表情/贴纸 id 全暖一遍 (面板开着就是那几百个) */
   function gwWarmAll() {
     try {
-      const e = [], s = [];
+      const e = [];
       for (const b of document.querySelectorAll('button[data-type="emoji"][data-id]')) e.push(b.dataset.id);
       for (const el of document.querySelectorAll('[contenteditable="true"] img[data-type="emoji"][data-id]')) e.push(el.dataset.id);
-      for (const st of document.querySelectorAll('[data-type="sticker"][data-id]')) s.push(st.dataset.id);
       if (e.length) gwWarm('emoji', e);
-      if (s.length) gwWarm('sticker', s);
     } catch (err) {}
   }
 
@@ -1964,12 +1962,6 @@
   const EMO_NAME = /^:([a-zA-Z0-9_]{2,64}):$/;
   const emoGood = Object.create(null);      // 名字 → 渲染成过图 (可用)
   const emoBroken = Object.create(null);    // 名字 → 渲染成过字面文本 (不可用)
-  /* 贴纸没有「名字渲染成文本」这种降级形态, 它的证据只能从【发出来的图】取:
-   * 消息里出现过的 sticker id = 我们客户端能拿它当图用 → 不接手。
-   * (旧版实测过: 9 张里有 2 张 guild_id 不一致但仍可发 —— 伙伴/加成服的贴纸
-   *  不在我的 GUILD_CREATE.stickers[] 里却能用, 拿网关集合单独接手会误伤)
-   * cdn.discordapp.com/stickers/ 被 CORS 卡, 客户端用 media 域 → 两个域都认。 */
-  const stGood = Object.create(null);       // 贴纸 id → 在消息里渲染成过图
   /* 名字 → 尝试失败次数。上限 2 次就不再试: paste 有可能实际已落文本但校验没对上,
    * 每 1.2s 重贴一次会变成 `[. ](url) [. ](url) …` 满屏——宁可不换也不能贴一串。 */
   const emoTried = Object.create(null);
@@ -1994,11 +1986,6 @@
           if (sp.querySelector && sp.querySelector('img')) continue;
           const m = EMO_NAME.exec(String(sp.textContent || '').trim());
           if (m && !emoGood[m[1]]) emoBroken[m[1]] = Date.now();
-        }
-        /* 同一批消息里渲染成图的贴纸 → 记入 stGood (贴纸的 veto 证据) */
-        for (const im of box.querySelectorAll('img[src*="/stickers/"]')) {
-          const m2 = /stickers\/(\d{15,25})\./.exec(String(im.src || ''));
-          if (m2) stGood[m2[1]] = 1;
         }
       }
     } catch (e) {}
@@ -2086,6 +2073,104 @@
   }
 
   /** 下一个要接手的 chip: 命中 broken 名单、不在 good 名单、还没试过的第一个 */
+  /* ---------- Discord 自己的可用性判定 (从 React fiber 读) ----------
+   * 2026-11-16 实页一手证据, 表情格子的 fiber 里就摆着:
+   *   props.children.props = {
+   *     emoji: {guildId,id,animated,name,require_colons,available,roles,managed,version,type},
+   *     isLocked: false, allowAnimatedEmoji: true, size: 40, columnIndex, rowIndex }
+   *   整面板的清单在同一条 fiber 的 props.emojiDescriptors[N].emoji
+   * 【为何用它而不是猜 DOM】上一版靠 aria-disabled/锁图标猜, 实测把
+   *   isLocked=false 的【本服静态表情】当成锁着 → 好好的表情被换成链接。
+   * 【为何不用网关集合】实页探针: 瘦身 READY 之后一条 GUILD_CREATE 都没有
+   *   (g=0 e=0 s=0), 那套判据在这台上天然拿不到数据 —— 所以换层。 */
+  const emojiEnt = Object.create(null);     // id → {name, guildId, animated, locked?}
+  let allowAnimatedHere = null;            // 这条频道允许自动图不 (Discord 给的)
+
+  function fiberEmojiBag(el, up) {
+    try {
+      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
+      let f = fk ? el[fk] : null;
+      for (let i = 0; i < (up || 5) && f; i++) {
+        for (const p of [f.memoizedProps, f.pendingProps]) {
+          if (!p) continue;
+          if (p.emoji && (p.emoji.id || p.emoji.guildId)) return p;
+          const c = p.children && p.children.props;
+          if (c && c.emoji && (c.emoji.id || c.emoji.guildId)) return c;
+        }
+        f = f.return;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  /** 格子/chip 上 Discord 的判定; 拿不到返回 null
+   * 【locked 三态】Discord 给了布尔才算结论; 没给就是 undefined(未知) ——
+   * 当成 false 会把「拿不到判定」误读成「能用」, 当成 true 会误伤。 */
+  function tileLockInfo(el) {
+    if (!el || !el.dataset) return null;
+    const cur = el.__moeLockCache;
+    if (cur && cur.id === el.dataset.id) return cur.info;
+    const bag = fiberEmojiBag(el, 5);
+    const info = bag ? {
+      locked: typeof bag.isLocked === 'boolean' ? bag.isLocked : undefined,
+      anim: bag.allowAnimatedEmoji !== false,
+      emoji: bag.emoji,
+    } : null;
+    try { el.__moeLockCache = { id: el.dataset.id, info }; } catch (e) {}
+    return info;
+  }
+
+  /** 把面板整份清单收进缓存 (拿不到整份就逐格收) */
+  function harvestDescriptors() {
+    try {
+      const t = document.querySelector('button[data-type="emoji"][data-id]');
+      if (!t) return;
+      const fk = Object.keys(t).find((k) => k.indexOf('__reactFiber$') === 0);
+      let f = fk ? t[fk] : null;
+      for (let i = 0; i < 16 && f; i++) {
+        for (const p of [f.memoizedProps, f.pendingProps]) {
+          if (p && Array.isArray(p.emojiDescriptors) && p.emojiDescriptors.length) {
+            for (const d of p.emojiDescriptors) {
+              const e = d && d.emoji;
+              if (!e || !e.id) continue;
+              const rec = { name: e.name, guildId: String(e.guildId || ''), animated: !!e.animated };
+              if ('locked' in d) rec.locked = d.locked === true;          // 没这个键 = 未知
+              emojiEnt[e.id] = rec;
+            }
+            if (typeof p.allowAnimatedEmoji === 'boolean') allowAnimatedHere = p.allowAnimatedEmoji;
+            return;
+          }
+        }
+        f = f.return;
+      }
+      for (const el of document.querySelectorAll('button[data-type="emoji"][data-id]')) {
+        const info = tileLockInfo(el);
+        if (info && info.emoji && info.emoji.id) {
+          emojiEnt[info.emoji.id] = { name: info.emoji.name, guildId: String(info.emoji.guildId || ''), animated: !!info.emoji.animated, locked: info.locked };
+          if (allowAnimatedHere === null) allowAnimatedHere = info.anim;
+        }
+      }
+    } catch (e) {}
+  }
+
+  function currentGuildId() {
+    const m = /\/channels\/(\d+)\//.exec(location.pathname || '');
+    return m ? m[1] : null;
+  }
+
+  /** 这个表情在【当前频道】用得了吗 —— true=用不了, false=能用, null=判不出 */
+  function emojiUnusable(ent) {
+    if (!ent) return null;
+    if (ent.locked === true) return true;                  // Discord 明说锁了
+    if (ent.locked === false) return false;                // Discord 明说能用
+    if (gwStats.p > 0) return false;                       // 有会员 → 全都能用, 不接
+    const g = currentGuildId();
+    if (!g) return null;
+    if (ent.guildId && ent.guildId !== g) return true;      // 跳服务器且没会员 (主人报的那一类)
+    if (ent.animated && allowAnimatedHere === false) return true;
+    return false;
+  }
+
   function findNextBrokenChip() {
     const chips = document.querySelectorAll(
       '[contenteditable="true"] img[data-type="emoji"][data-id], [class*="slateTextArea"] img.emoji[data-id]');
@@ -2094,9 +2179,19 @@
       if (!m) continue;
       const name = m[1];
       if (emoGood[name]) continue;                                   // 渲染成过图 → 永不碰
-      /* 【主判据】网关集合; 【兼容】旧版从滞动条学下来的 broken */
-      const st = gwState('emoji', chip.getAttribute('data-id'));
-      if (st !== 'foreign' && !emoBroken[name]) continue;            // own / unknown → 这轮不动
+      /* 【主判据】Discord 自己的实体 (chip 的 fiber 里可能直接带着, 带 guildId);
+       * 【兼容】网关集合旁证 + 旧版从滞动条学下来的 broken */
+      const cid = chip.getAttribute('data-id');
+      let ent = emojiEnt[cid] || null;
+      if (!ent) {
+        const info = tileLockInfo(chip);
+        if (info && info.emoji && info.emoji.id) {
+          ent = emojiEnt[info.emoji.id] = { name: info.emoji.name, guildId: String(info.emoji.guildId || ''), animated: !!info.emoji.animated, locked: info.locked };
+        }
+      }
+      const u = emojiUnusable(ent);
+      if (u === false) continue;                                     // 确定能用 → 不碰
+      if (u !== true && gwState('emoji', cid) !== 'foreign' && !(emoBroken[name] && !emoGood[name])) continue;   // 零证据 → 不动
       if (emoTried[name] >= 2) { chip.setAttribute('data-moe-emo', 'skip'); continue; }
       if (chip.getAttribute('data-moe-emo')) continue;              // 试过 / 已放弃
       if (!chipEmojiUrl(chip)) continue;
@@ -2254,6 +2349,10 @@
    *   同时给诊断加了 data-hijack (take/free/no-id/lottie), 下次实页一眼就能看出
    *   到底有没有接管, 不用再从 insertStamp 是空倒推。 */
   function emojiLocked(host) {
+    /* 【首选 Discord 自己的结论】fiber 里的 isLocked 是它算好的 (外服/跳服使用/
+     * 动图要会员/角色限制全在里面); 拿不到才退到下面的 DOM 猜法。 */
+    const info = tileLockInfo(host);
+    if (info && info.locked !== undefined) return info.locked;
     if (!host) return false;
     const mark = host.getAttribute && host.getAttribute('data-moe-lock');
     if (mark !== null && mark !== undefined) {
@@ -2274,20 +2373,19 @@
           const host = emojiHost(item);
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
-          /* 【通杀判据】网关集合是第一信号: id 不在「我加入的服务器的
-           *   emojis[]」里 = 外服 = 无论 Discord 给没给锁标记都接手。
-           * 【吃不准就不动】gwState=own/unknown 且 Discord 没标锁 → 交回原生。
-           *   面板一开 gwWarmAll 就把这些 id 暖好了, 点到时基本都有结论。 */
-          const gw = gwState('emoji', id);
-          /* 【通杀判据】网关集合: id 不在「我加入的服务器的 emojis[]」里 = 外服。
-           * 【但 Discord 自己的信号优先生效方向】伙伴服/加成服的表怃我们能用,
-           *   却不在我们的 Set 里 → 拿 gw 单独接手会降级成链。所以再加一道
-           *   「见过它渲染成图 (emoGood)」否决: 真能用的不碰。 */
-          const nm0 = (host.dataset && host.dataset.name) || '';
-          if (!emojiLocked(host) && !(gw === 'foreign' && nm0 && !emoGood[nm0])) {
-            stamp('hijack', 'emoji:free'); return;                            // 能用的/吃不准的 → 交回原生
+          /* 【判据】fiber 里的 isLocked 是 Discord 自己算完的结论 (外服/跳服使用/
+           *   动图要会员/角色限制全在里面) —— 它是唯一权威。
+           * 【上一版的错】拿网关集合当主判据, 但实页探针证明瘦身 READY 之后
+           *   一条 GUILD_CREATE 都没有 (g=0), 而那套 DOM 猜法把 isLocked=false 的
+           *   本服静态表情当成锁着 → 好好的表情被换成链。所以 fiber 拿不到时
+           *   才退回旧猜法 + 网关旁证。 */
+          const info = tileLockInfo(host);
+          if (info && info.locked !== undefined) {
+            if (!info.locked) { stamp('hijack', 'emoji:free:dc'); return; }  // 能用 → 交回原生
+          } else if (!emojiLocked(host) && gwState('emoji', id) !== 'foreign') {
+            stamp('hijack', 'emoji:free'); return;
           }
-          const animated = host.getAttribute('data-animated') === 'true';
+          const animated = info ? !!info.emoji.animated : host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
           stamp('hijack', 'emoji:take' + (animated ? ':gif' : ''));
@@ -2325,10 +2423,13 @@
    *   所以两个接手监听开头都先 `if (t.closest('.moe-copy')) return;`,
    *   让钮自己的 click 里 stop (那才是正确的位置)。 */
   const COPY_CSS =
-    '.moe-copy{position:absolute;right:2px;bottom:2px;z-index:20;min-width:18px;height:18px;' +
-    'padding:0 4px;border:0;border-radius:4px;background:rgba(0,0,0,.66);color:#fff;' +
-    'font:11px system-ui,sans-serif;line-height:18px;cursor:pointer;opacity:.5}' +
-    '.moe-copy:hover{opacity:1;background:#1e6fd9}' +
+    '.moe-copy{position:absolute;left:2px;top:2px;z-index:20;min-width:16px;height:16px;' +
+    'padding:0 3px;border:0;border-radius:3px;background:rgba(0,0,0,.72);color:#fff;' +
+    'font:10px system-ui,sans-serif;line-height:16px;cursor:pointer;opacity:0;pointer-events:none}' +
+    /* 【不挡图】默认完全不浮现, 悬停到格子/贴纸才出来 —— 主人要求「不要挡住表情贴纸」 */
+    'button[data-type="emoji"]:hover>.moe-copy,[data-type="sticker"]:hover>.moe-copy,' +
+    '[class*="sticker"]:hover .moe-copy{opacity:1;pointer-events:auto}' +
+    '.moe-copy:hover{background:#1e6fd9;opacity:1;pointer-events:auto}' +
     '.moe-copy[data-moe-copy="done"]{background:rgba(35,165,90,.92);opacity:1}';
   function ensureCopyStyle() {
     try {
@@ -2405,43 +2506,11 @@
     } catch (e) {}
     return null;
   }
-  function hijackStickerClicks() {
-    try {
-      document.addEventListener('click', (e) => {
-        try {
-          const t = e.target;
-          if (!t || !t.closest) return;
-          const el = t.closest('[data-type="sticker"], [class*="sticker_"][data-id]');
-          if (!el || !el.dataset || !el.dataset.id) return;
-          if (t.closest('.moe-copy')) return;              // 同上
-          /* 【锁定判定以 stickerUnsendable 为主】
-           * Discord 自己就把“发不了”的贴纸标上 stickerUnsendable (带 grayscale 滤镜),
-           * 这比我们拿 guild_id 自己推更准 —— 实测有贴纸虽然 guild_id 不同但仍可发
-           * (9 张里有 2 张不一致)。guild_id 只作辅助。 */
-          const node = el.querySelector('[class*="stickerNode"]') || el.closest('[class*="stickerNode"]');
-          const unsendable = !!(node && /stickerUnsendable/.test(node.getAttribute('class') || ''));
-          const sid = el.dataset ? el.dataset.id : '';
-          const gw = gwState('sticker', sid);
-          /* 【优先级】unsendable 是权威 (Discord 自己标的「这个我发不了」);
-           * gw 只补一个洞: 不在我的 stickers[] 集合里且【没在消息里见过它当图用】
-           * 才接手 —— 伙伴/加成服的贴纸不在我的集合但确实能用, stGood 挡住它。 */
-          if (!unsendable && !(gw === 'foreign' && !stGood[sid])) { stamp('hijack', 'sticker:free'); return; }
-          const ent = stickerEntity(el);
-          const fmt = el.dataset.formatType || (ent && ent.format_type) || 1;
-          const url = stickerCdnUrl(el.dataset.id, fmt);
-          if (!url) { stamp('hijack', 'sticker:lottie'); return; }        // Lottie 等不可链接化 → 交回 Discord
-          e.preventDefault();
-          e.stopPropagation();
-          stamp('hijack', 'sticker:take:' + fmt);
-          insertIntoComposer(linkText(url) + ' ').catch(() => {});
-          if (!e.shiftKey) closeExpressionPicker();
-        } catch (err) {}
-      }, true);
-    } catch (e) {}
-  }
 
   function watchEmoji() {
-    try { unlockEmoji(); hijackEmojiClicks(); hijackStickerClicks(); } catch (e) {}
+    try { unlockEmoji(); hijackEmojiClicks(); } catch (e) {}
+    /* 【贴纸不再接手点击】2026-11-16 主人拍板:「点贴纸直接输进输入框」取消掉,
+     * 只保留左侧复制钮 —— 能发的交回 Discord 原生发贴纸。 */
     const mo = new MutationObserver(() => { try { unlockEmoji(); } catch (e) {} });
     mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
     setInterval(() => { try { unlockEmoji(); } catch (e) {} }, 1200);
@@ -2467,6 +2536,7 @@
       if (emoTick === 0) {
         scanEmojiRender();
         addCopyButtons();                                 // 贴纸/表情的复制钮
+        harvestDescriptors();                             // 收 Discord 自己的表情实体与锁定结论
         stamp('gw', 'g=' + gwStats.g + ' e=' + gwStats.e + ' s=' + gwStats.s +
           (gwStats.p >= 0 ? ' nitro=' + gwStats.p : '') + (gwSettled ? '' : ' booting'));
       }

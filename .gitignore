@@ -27,3 +27,7 @@ _*.json
 
 # 会话粘贴板
 .pideck-paste/
+
+# 发版工具链本身进仓库, 但它产生的状态与正文快照不进
+dev/ship/rel.json
+dev/ship/body-*.md

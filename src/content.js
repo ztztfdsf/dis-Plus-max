@@ -1,4 +1,4 @@
-/* ══════════════════════════════════════════════════════════════════
+﻿/* ══════════════════════════════════════════════════════════════════
  * MoeGuard 喵图混淆 —— 隔离世界 UI (ISOLATED world, document_idle) v1.5
  *
  * 职责:
@@ -1657,12 +1657,17 @@
       }
     } catch (e) {}
     try {
-      /* 只做一件事: 摘掉 Discord 拦点击的 aria-disabled。
-       * 【不再判「锁没锁」】主人拍板「一律提取链接、不走原生」后, 锁信号没有
-       * 消费者了 —— 旧的 markEmojiLock/emojiLocked(靠猜 DOM) 与 data-moe-lock
-       * 一并删除, 少一套会误判的状态。 */
+      /* 【先固化锁信号, 再去掉 aria-disabled】顺序不能反 —— 这就是主人报的
+       * 「解锁了的表情插不出链接」的真因, 详见 emojiLocked() 的注释。
+       * 【3.7.11 原样回归】主人拍板把表情栏判定回退到 3.7.11: 判锁用
+       * Discord 自己的锁信号 (emojiLockIcon / aria-disabled / NitroLocked 分区),
+       * 不再自创 guildId 那套 (3.7.18 判不出归属 → 把能用的表情也全转了链,
+       * 主人当场骂回来)。真页 2026-11-16 实测: 51 格里 8 格带 emojiLockIcon,
+       * aria-disabled 为 0 —— 锁图标就是活信号。 */
       document.querySelectorAll('button[data-type="emoji"], [class*="emojiItem"]').forEach((el) => {
         const host = emojiHost(el);
+        markEmojiLock(host);
+        // 去掉禁用标记 (Discord 用 aria-disabled 拦点击)
         if (host.getAttribute('aria-disabled') === 'true') host.removeAttribute('aria-disabled');
         if (el !== host && el.getAttribute('aria-disabled') === 'true') el.removeAttribute('aria-disabled');
       });
@@ -1963,32 +1968,56 @@
     if (item.matches && item.matches('button[data-type="emoji"]')) return item;
     return (item.querySelector && item.querySelector('button[data-type="emoji"]')) || item;
   }
-  /** 这个格子在表情/贴纸面板里吗?
-   * 【为什么必须分这一刀】聊天里已发出的贴纸同样带 data-type="sticker"+data-id,
-   * 而点它是为了看大图 —— 接手就会把大图点击变成往输入框插链接。
-   * 面板的宿主是 Discord 的 clickTrap 容器 (真页实测: 表情格与贴纸格共用同一个 trap)。 */
-  function inExpressionPanel(el) {
-    try {
-      return !!(el.closest && (el.closest('#emoji-picker-grid') ||
-        el.closest('[class*="trapClicks"]') || el.closest('[class*="clickTrapContainer"]') ||
-        el.closest('[class*="expression"]')));
-    } catch (e) { return false; }
+  /* ==== 3.7.11 原样回归的四段 (主人: 把表情栏代码回退到 3.7.11) ==== */
+  function emojiLockedLive(host) {
+    if (!host) return false;
+    if (host.getAttribute && host.getAttribute('aria-disabled') === 'true') return true;
+    if (host.querySelector && host.querySelector('[class*="emojiLockIcon"]')) return true;
+    if (host.closest && host.closest('[class*="NitroLocked"]')) return true;
+    const li = host.closest && host.closest('li');
+    if (li && li.querySelector('[class*="emojiLockIcon"]')) return true;
+    return false;
   }
-  /** 核心判断就这两下 (主人: 直接从内核, 别搞复杂):
-   * ① 格子自己 props 里的 emoji.guildId (真页实测形状: memoizedProps.children.props.emoji)
-   * ② URL /channels/<当前服id>/… —— 相同 → 交回原生 (3.7.11 手感),
- *    不同/拿不到 → 转链 (非会员发外服必弹「仅限 Nitro」, 拦死那条路)。 */
-  function emojiGuildId(host) {
-    try {
-      const k = Object.keys(host).find((x) => x.indexOf('__reactFiber$') === 0);
-      const p = k && host[k].memoizedProps;
-      const em = p && p.children && p.children.props && p.children.props.emoji;
-      return em && em.guildId ? String(em.guildId) : '';
-    } catch (e) { return ''; }
+
+  /** 把锁信号固化到 data-moe-lock 上
+   * 存【当时那个表情的 id】而不是布尔: 表情面板是虚拟滚动,
+   *   React 会把同一个 button 节点复用给别的表情 —— 只存 '1' 的话滚一下
+   *   就会把没锁的表情也当成锁的, 于是本可原生发的表情反而被换成链接。 */
+  function markEmojiLock(host) {
+    if (!host || !host.getAttribute) return;
+    const sig = (host.dataset && host.dataset.id) || '1';
+    if (emojiLockedLive(host)) { host.setAttribute('data-moe-lock', sig); return; }
+    const had = host.getAttribute('data-moe-lock');
+    if (had === null) return;
+    /* 还是同一个表情 → 保留标记: 信号消失只是因为下面把 aria-disabled 摘了。
+     * 换了表情 (id 不同) → 节点被复用, 旧标记必须清掉。 */
+    if (had !== sig) host.removeAttribute('data-moe-lock');
   }
-  function currentGuildId() {
-    try { return (/^\/channels\/(\d+)/.exec(location.pathname) || [, window.__moeGid])[1] || ''; }
-    catch (e) { return ''; }
+
+  /** 这个表情是不是被锁 (需要我们接手)
+   * 【主人报的 bug】所有「解锁了的」表情/贴纸插不出链接, 发出去对方看不到图。
+   * 【实页诊断实测 2026-09】点本服动图表情 (data-animated=true, 需 Nitro):
+   *     insertStamp = null   ← 我们的 insertIntoComposer 根本没跑 (它每次都会 stamp)
+   *     输入框只多了 12 个字符 ← CDN 链接 60+ 字符, 那是 Discord 自己插的 :name:
+   *     ariaDisabled = null  ← 锁信号不在了
+   *   → emojiLocked() 返回 false, 我们根本没接手, 文本形式服务端不解析。
+   * 【自己担的锅】unlockEmoji() 每 1.2s + 每次 DOM 变动都跑
+   *   removeAttribute('aria-disabled') —— 而 aria-disabled 正是这里最主要的锁信号。
+   *   面板一渲染它就被我们自己擦掉, 等主人点下去时已无从判断。
+   *   (剩下两条: 按钮内 emojiLockIcon —— 实测 hasLockIcon=false;
+   *    NitroLocked 分区 —— 本服表情不在里面。)
+   * 【修法】固化在前、擦除在后: 先把锁信号连同表情 id 写进 data-moe-lock,
+   *   再摘 aria-disabled。判定时优先读这个标记, 读不到才看实时信号。
+   *   同时给诊断加了 data-hijack (take/free/no-id/lottie), 下次实页一眼就能看出
+   *   到底有没有接管, 不用再从 insertStamp 是空倒推。 */
+  function emojiLocked(host) {
+    if (!host) return false;
+    const mark = host.getAttribute && host.getAttribute('data-moe-lock');
+    if (mark !== null && mark !== undefined) {
+      const sig = (host.dataset && host.dataset.id) || '1';
+      if (mark === sig) return true;
+    }
+    return emojiLockedLive(host);
   }
   function hijackEmojiClicks() {
     try {
@@ -2002,16 +2031,23 @@
            * → 点格子 = preventDefault+stopPropagation (原生整段不跑, 不会弹会员框)
            *   + 插 [. ](贴纸图链) + 自动收面板 (Shift = 留着连续挑)。 */
           const st = t.closest('[data-type="sticker"], [class*="sticker_"][data-id]');
-          if (st && st.dataset && st.dataset.id && inExpressionPanel(st)) {
-            const sent = stickerEntity(st);
-            const fmt = st.dataset.formatType || (sent && sent.format_type) || 1;
-            const surl = stickerCdnUrl(st.dataset.id, fmt);
-            if (!surl) { stamp('hijack', 'sticker:lottie'); return; }   // Lottie 链化没意义 → 交回 Discord
-            e.preventDefault();
-            e.stopPropagation();
-            stamp('hijack', 'sticker:take:' + fmt);
-            insertIntoComposer(linkText(surl) + ' ').catch(() => {});
-            if (!e.shiftKey) closeExpressionPicker();
+          if (st && st.dataset && st.dataset.id) {
+            /* 【3.7.11 原样回归】贴纸判锁以 Discord 自己的 stickerUnsendable 为主
+             * (带 grayscale 滤镜的那个类), 能发就交回原生 —— 不再自创判据。 */
+            const snode = st.querySelector('[class*="stickerNode"]') || st.closest('[class*="stickerNode"]');
+            const unsendable = !!(snode && /stickerUnsendable/.test(snode.getAttribute('class') || ''));
+            if (!unsendable) { stamp('hijack', 'sticker:free'); }
+            else {
+              const sent = stickerEntity(st);
+              const fmt = st.dataset.formatType || (sent && sent.format_type) || 1;
+              const surl = stickerCdnUrl(st.dataset.id, fmt);
+              if (!surl) { stamp('hijack', 'sticker:lottie'); return; }   // Lottie 链化没意义 → 交回 Discord
+              e.preventDefault();
+              e.stopPropagation();
+              stamp('hijack', 'sticker:take:' + fmt);
+              insertIntoComposer(linkText(surl) + ' ').catch(() => {});
+              if (!e.shiftKey) closeExpressionPicker();
+            }
             return;
           }
           const item = t.closest('button[data-type="emoji"], [class*="emojiItem"], li[role="gridcell"]');
@@ -2019,16 +2055,13 @@
           const host = emojiHost(item);
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
-          /* 表情栏回到原生优先 (主人: 对齐 3.7.11 + 没权限的转链):
-           * 本服 → 交回原生 (原生插芯片、原生收面板);
-           * 外服/判不出 → 拦死原生 + 插链 + 收面板 (防「仅限 Nitro」弹框)。 */
-          const eg = emojiGuildId(host);
-          const cg = currentGuildId();
-          if (cg && eg && eg === cg) { stamp('hijack', 'emoji:free'); return; }
+          /* 【3.7.11 原样】能用的 (没锁) 交回 Discord 原生: 原生插 <:名字:id>
+           * 芯片、原生收面板。锁住的 (要 Nitro/外服) 才接手转链。 */
+          if (!emojiLocked(host)) { stamp('hijack', 'emoji:free'); return; }
           const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
-          stamp('hijack', (eg ? 'emoji:take:foreign' : 'emoji:take:unk') + (animated ? ':gif' : ''));
+          stamp('hijack', 'emoji:take' + (animated ? ':gif' : ''));
           insertIntoComposer(linkText(emojiCdnUrl(id, animated)) + ' ').catch(() => {});   // 不弹 toast (主人要求)
           if (!e.shiftKey) closeExpressionPicker();   // Shift 连着挑 → 留着面板
         } catch (err) {

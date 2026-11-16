@@ -42,6 +42,84 @@
     try { window.postMessage(Object.assign({ __moe: 1 }, obj), '*'); } catch (e) {}
   }
 
+  /* ════════════════ 网关探针: 我这客户端到底认识哪些表情/贴纸 ════════════════
+   * 【为何走协议层而不到 Discord 内部挖】2026-11-16 实页探测:
+   *   webpack 一共 9044 个模块, 但属性名被 terser 打了 ——
+   *   getAllReadyEmojis / isUsable / EmojiStore / unsendable 全部 0 命中。
+   *   抓内部函数 = 埋一颗版本地雷。
+   * 【探针结果】网关 dispatch 就是走页面 JSON.parse, 原文形如
+   *   {"t":"MESSAGE_CREATE","s":1706,"op":0,"d":{...}}
+   *   (实抓到 PRESENCE_UPDATE / MESSAGE_CREATE / MESSAGE_UPDATE /
+   *    SESSIONS_REPLACE / MESSAGE_REACTION_ADD)
+   * 【为何 GUILD_CREATE 是权威清单】开机洪峰里我加入的每个服务器一条,
+   *   自带 emojis[] 与 stickers[] —— 这两个 Set 就是「我能原生用的 id」。
+   *   不在里面的 = 外服 = 发出去只会变成一串字面字符。
+   *   这一下就是全部外服表情通杀, 不靠「在滞动条里偶然见过它挂掉」。
+   * 【成本】不对字符串做匹配, 只看 parse 完的对象的 op/t 两个属性 ——
+   *   每次 parse 两次属性读, 可忽略; 只有 GUILD_* / READY 才走后续逻辑。
+   * 【洪峰未完时绝不能判】content.js 拿到 settled=false 就本轮不动手。 */
+  const ownEmoji = new Set();
+  const ownSticker = new Set();
+  const GW_T = { GUILD_CREATE: 1, GUILD_UPDATE: 1, READY: 1, USER_UPDATE: 1 };
+  let gwGuilds = 0, gwLastAt = 0, readySeen = false, premiumType = -1;
+  const gwStartAt = Date.now();
+
+  function gwHarvest(v) {
+    const t = v.t, d = v.d;
+    if (!d || typeof d !== 'object') return;
+    if (t === 'GUILD_CREATE' || t === 'GUILD_UPDATE') {
+      let n = 0;
+      if (Array.isArray(d.emojis)) { for (const e of d.emojis) { if (e && e.id) { ownEmoji.add(String(e.id)); n++; } } }
+      if (Array.isArray(d.stickers)) { for (const s of d.stickers) { if (s && s.id) ownSticker.add(String(s.id)); } }
+      if (t === 'GUILD_CREATE') { gwGuilds++; gwLastAt = Date.now(); }
+      log({ ev: 'gw', t, guild: String(d.id || '').slice(-6), emojis: n, e: ownEmoji.size, s: ownSticker.size, g: gwGuilds });
+    } else if (t === 'READY') {
+      readySeen = true;
+      if (d.user && typeof d.user.premium_type === 'number') premiumType = d.user.premium_type;
+      log({ ev: 'gw', t: 'READY', guilds: (d.guilds || []).length, e: ownEmoji.size, s: ownSticker.size, p: premiumType });
+    } else if (t === 'USER_UPDATE' && typeof d.premium_type === 'number') {
+      premiumType = d.premium_type;
+    }
+  }
+
+  /** 洪峰算不算完了: READY 到了且 3s 没新 GUILD_CREATE, 或者已经过了 25s */
+  function gwSettled() {
+    if (Date.now() - gwStartAt > 25000) return true;
+    return readySeen && (Date.now() - gwLastAt > 3000);
+  }
+
+  const origJsonParse = JSON.parse;
+  JSON.parse = function () {
+    const v = origJsonParse.apply(this, arguments);
+    try {
+      if (v && v.op === 0 && GW_T[v.t]) gwHarvest(v);
+    } catch (e) {}
+    return v;
+  };
+  window.__moeGw = {
+    get guilds() { return gwGuilds; },
+    get emoji() { return ownEmoji.size; },
+    get sticker() { return ownSticker.size; },
+    get premium() { return premiumType; },
+    get settled() { return gwSettled(); },
+  };
+
+  /* 查询口: content.js (隔离世界) 把一批 id 过来, 这里回哪些是我自己的 */
+  window.addEventListener('message', (ev) => {
+    const d = ev && ev.data;
+    if (!d || d.__moe !== 1 || d.gwq !== 1) return;
+    try {
+      const set = d.kind === 'sticker' ? ownSticker : ownEmoji;
+      const ids = Array.isArray(d.ids) ? d.ids : [];
+      const own = [];
+      for (const id of ids) { const s = String(id || ''); if (s && set.has(s)) own.push(s); }
+      window.postMessage({
+        __moe: 1, gw: 1, reqId: d.reqId, kind: d.kind, own: own, settled: gwSettled(),
+        stats: { g: gwGuilds, e: ownEmoji.size, s: ownSticker.size, p: premiumType, r: readySeen ? 1 : 0 },
+      }, '*');
+    } catch (e) {}
+  });
+
   /* ---------- 上传地址识别 ---------- */
   function isUploadUrl(u) {
     const s = String(u || '');

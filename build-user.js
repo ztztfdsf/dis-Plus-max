@@ -105,12 +105,19 @@ function patchHook(src) {
   src = src.split('const nativeFetch = window.fetch ? window.fetch.bind(window) : null;')
            .join('const nativeFetch = PAGE.fetch ? PAGE.fetch.bind(PAGE) : null;');
   src = src.split('window.fetch = async function moeFetch(').join('PAGE.fetch = async function moeFetch(');
+  /* 【网关探针同样得打在页面 realm】JSON.parse 是【页面对象上的方法】, 不是全局变量 ——
+   * 沙箱里改自己那份等于什么都没干, 永远说不出「我认识哪些表情」。 */
+  src = must(src, 'const origJsonParse = JSON.parse;', '网关探针 origJsonParse 锚点');
+  src = src.split('const origJsonParse = JSON.parse;').join('const origJsonParse = PAGE.JSON.parse;');
+  src = src.split('  JSON.parse = function () {').join('  PAGE.JSON.parse = function () {');
   /* 【漏了就白干】两处 Object.defineProperty(window, '__moeXxx') 的首参是裸 window,
    * 上面的字符串替换碰不到它 → 标记打在沙箱窗上, 页面上白标一次。 */
   src = src.split("Object.defineProperty(window,").join("Object.defineProperty(PAGE,");
   if (src === before) throw new Error('hook.js 补丁一条都没生效');
   if (/const XHRProto = XMLHttpRequest\.prototype;/.test(src)) throw new Error('XHR 补丁没生效');
   if (/Object\.defineProperty\(window,/.test(src)) throw new Error('defineProperty 目标补丁没生效');
+  if (/^  JSON\.parse = function/m.test(src)) throw new Error('网关探针没改到 PAGE.JSON.parse —— 外服表情判据会全挂');
+  if (!/PAGE\.JSON\.parse = function/.test(src)) throw new Error('网关探针锚点丢了');
   return patchHookLogic(patchHookGuard(src));
 }
 

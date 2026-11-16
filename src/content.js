@@ -980,6 +980,8 @@
         }
         return;
       }
+      /* 网关探针回包: hook.js 从 GUILD_CREATE 里学到的「我自己的 id」 */
+      if (e.data.gw === 1) { gwReply(e.data); return; }
       if (!e.data.ev) return;
       const d = e.data;
       tele(d);
@@ -1042,7 +1044,7 @@
   }
   /* 调试/仿真入口。v3.7.12 之前只挂在非扩展分支上 —— 带 shim 的形态里
    * EXT 为真, 仿真台/面板就什都拿不到, 提到分支外两种形态都有。 */
-  window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, scanEmojiRender, convertBrokenEmojiChips, get decisions() { return decisions.slice(); }, get cfg() { return cfg; }, get emo() { return { good: Object.keys(emoGood), broken: Object.keys(emoBroken) }; } };
+    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, scanEmojiRender, convertBrokenEmojiChips, gwWarmAll, gwState, addCopyButtons, copyText, get decisions() { return decisions.slice(); }, get cfg() { return cfg; }, get emo() { return { good: Object.keys(emoGood), broken: Object.keys(emoBroken), stickers: Object.keys(stGood), gw: gwStats, settled: gwSettled, cached: gwCache.size }; } };
 
   /* ---------- 移除举报入口 (主人要求: 整个 Discord 界面去掉举报) ---------- */
   const REPORT_KEYWORDS = ['report', '举报', '報告', '申告'];
@@ -1843,6 +1845,103 @@
     return false;
   }
 
+  /* ══════════════ 网关判据客户端 (数据在 hook.js 那一侧) ══════════════
+   * hook.js 在 document_start 包了页面 JSON.parse, 从网关 GUILD_CREATE 里
+   * 把【我加入的所有服务器】的 emojis[]/stickers[] 存成两个 Set。
+   * id 在 Set 里 = 我能原生用; 不在 = 外服 = 发出去只会变一串字面字符。
+   * 这是「全部外服表情通杀」的根 —— 不再靠偶然在滞动条里见过它挂掉。
+   * (2026-11-16 实页探过: Discord 的 9044 个 webpack 模块属性名被 terser 打了,
+   *  getAllReadyEmojis / isUsable / EmojiStore 全 0 命中 → 抓内部函数不可靠;
+   *  而网关 dispatch 就是走页面 JSON.parse, 原文形如
+   *  {"t":"MESSAGE_CREATE","s":1706,"op":0,"d":{...}})
+   *
+   * 三条铁律:
+   *   ① 洪峰没完 (settled=false) 一律当 unknown —— 否则开机那几秒会把
+   *      自家服务器的表情误判成外服, 把能用的东西换成链接
+   *   ② unknown 绝不动手 (只有确定的 foreign 才接手)
+   *   ③ 面板/输入框里的 id 提前批量暖好 —— 点击时才能同步出结论 */
+  const gwCache = new Map();          // 'e:<id>' | 's:<id>' → true=我的 / false=外服
+  const gwWaiters = new Map();
+  let gwSeq = 0;
+  let gwReady = false;                // hook.js 回过话 = 探针在跑
+  let gwSettled = false;              // 洪峰完了没
+  let gwStats = { g: 0, e: 0, s: 0, p: -1, r: 0 };
+
+  function gwKey(kind, id) { return (kind === 'sticker' ? 's:' : 'e:') + String(id); }
+
+  function gwReply(d) {
+    gwReady = true;
+    gwSettled = !!d.settled;
+    if (d.stats) gwStats = d.stats;
+    const w = gwWaiters.get(d.reqId);
+    if (!w) return;
+    clearTimeout(w.timer);
+    gwWaiters.delete(d.reqId);
+    const own = new Set((d.own || []).map(String));
+    for (const id of w.ids) gwCache.set(w.key + id, own.has(id));
+  }
+
+  /** 批量暖缓存 (fire-and-forget; 下一轮或下次点击就能同步拿到结论) */
+  function gwWarm(kind, ids) {
+    const key = kind === 'sticker' ? 's:' : 'e:';
+    const need = [];
+    for (const raw of ids) {
+      const id = String(raw || '');
+      if (!id || gwCache.has(key + id)) continue;
+      if (need.indexOf(id) < 0) need.push(id);
+    }
+    if (!need.length) return;
+    const reqId = ++gwSeq;
+    const timer = setTimeout(() => { if (gwWaiters.delete(reqId)) stamp('gw', 'no-answer:' + need.length); }, 2500);
+    gwWaiters.set(reqId, { ids: need, key, timer });
+    try { window.postMessage({ __moe: 1, gwq: 1, reqId, kind, ids: need }, '*'); }
+    catch (e) { clearTimeout(timer); gwWaiters.delete(reqId); }
+  }
+
+  /** 'own' 我的 | 'foreign' 外服 | 'unknown' 还不肯定 (洪峰未完/未暖/探针没跑) */
+  function gwState(kind, id) {
+    if (!gwReady || !gwSettled || !id) return 'unknown';
+    const v = gwCache.get(gwKey(kind, id));
+    return v === true ? 'own' : v === false ? 'foreign' : 'unknown';
+  }
+
+  /** 把当前 DOM 上能看到的表情/贴纸 id 全暖一遍 (面板开着就是那几百个) */
+  function gwWarmAll() {
+    try {
+      const e = [], s = [];
+      for (const b of document.querySelectorAll('button[data-type="emoji"][data-id]')) e.push(b.dataset.id);
+      for (const el of document.querySelectorAll('[contenteditable="true"] img[data-type="emoji"][data-id]')) e.push(el.dataset.id);
+      for (const st of document.querySelectorAll('[data-type="sticker"][data-id]')) s.push(st.dataset.id);
+      if (e.length) gwWarm('emoji', e);
+      if (s.length) gwWarm('sticker', s);
+    } catch (err) {}
+  }
+
+  /* ---------- 复制为链接格式 ----------
+   * 主人报的缺口: Discord 给贴纸【没有任何复制入口】(右键只有复制图片/
+   * 复制消息链接), 想拿它的图链只能自己抓。这里给表情/贴纸补上:
+   * 复制出去的就是 `[. ](URL)` —— 粘到哪都是一个点 + 图。 */
+  function copyFallback(text) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('style', 'position:fixed;left:-9999px;top:0;opacity:0');
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = !!(document.execCommand && document.execCommand('copy'));
+      ta.remove();
+      return ok;
+    } catch (e) { return false; }
+  }
+  function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text).then(() => true).catch(() => copyFallback(text));
+      }
+    } catch (e) {}
+    return Promise.resolve(copyFallback(text));
+  }
+
   /* ---------- 外服表情: 还在输入栏里就就地换成短链图 ----------
    * 【现象】用了你不在的服务器的表情 (非伙伴/认证服), 输入栏里能正常渲染成图,
    *   但 Discord 照样把 <:name:id> 发出去, 接收端 (连自己) 只看到一串字面字符。
@@ -1865,6 +1964,12 @@
   const EMO_NAME = /^:([a-zA-Z0-9_]{2,64}):$/;
   const emoGood = Object.create(null);      // 名字 → 渲染成过图 (可用)
   const emoBroken = Object.create(null);    // 名字 → 渲染成过字面文本 (不可用)
+  /* 贴纸没有「名字渲染成文本」这种降级形态, 它的证据只能从【发出来的图】取:
+   * 消息里出现过的 sticker id = 我们客户端能拿它当图用 → 不接手。
+   * (旧版实测过: 9 张里有 2 张 guild_id 不一致但仍可发 —— 伙伴/加成服的贴纸
+   *  不在我的 GUILD_CREATE.stickers[] 里却能用, 拿网关集合单独接手会误伤)
+   * cdn.discordapp.com/stickers/ 被 CORS 卡, 客户端用 media 域 → 两个域都认。 */
+  const stGood = Object.create(null);       // 贴纸 id → 在消息里渲染成过图
   /* 名字 → 尝试失败次数。上限 2 次就不再试: paste 有可能实际已落文本但校验没对上,
    * 每 1.2s 重贴一次会变成 `[. ](url) [. ](url) …` 满屏——宁可不换也不能贴一串。 */
   const emoTried = Object.create(null);
@@ -1889,6 +1994,11 @@
           if (sp.querySelector && sp.querySelector('img')) continue;
           const m = EMO_NAME.exec(String(sp.textContent || '').trim());
           if (m && !emoGood[m[1]]) emoBroken[m[1]] = Date.now();
+        }
+        /* 同一批消息里渲染成图的贴纸 → 记入 stGood (贴纸的 veto 证据) */
+        for (const im of box.querySelectorAll('img[src*="/stickers/"]')) {
+          const m2 = /stickers\/(\d{15,25})\./.exec(String(im.src || ''));
+          if (m2) stGood[m2[1]] = 1;
         }
       }
     } catch (e) {}
@@ -1983,7 +2093,10 @@
       const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
       if (!m) continue;
       const name = m[1];
-      if (emoGood[name] || !emoBroken[name]) continue;              // 可用/未知的 → 不碰
+      if (emoGood[name]) continue;                                   // 渲染成过图 → 永不碰
+      /* 【主判据】网关集合; 【兼容】旧版从滞动条学下来的 broken */
+      const st = gwState('emoji', chip.getAttribute('data-id'));
+      if (st !== 'foreign' && !emoBroken[name]) continue;            // own / unknown → 这轮不动
       if (emoTried[name] >= 2) { chip.setAttribute('data-moe-emo', 'skip'); continue; }
       if (chip.getAttribute('data-moe-emo')) continue;              // 试过 / 已放弃
       if (!chipEmojiUrl(chip)) continue;
@@ -2157,10 +2270,23 @@
           if (!t || !t.closest) return;
           const item = t.closest('button[data-type="emoji"], [class*="emojiItem"], li[role="gridcell"]');
           if (!item) return;
+          if (t.closest('.moe-copy')) return;              // 复制钮自己的事, 不在这拦
           const host = emojiHost(item);
-          if (!emojiLocked(host)) { stamp('hijack', 'emoji:free'); return; }   // 能用的让 Discord 原生处理
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
+          /* 【通杀判据】网关集合是第一信号: id 不在「我加入的服务器的
+           *   emojis[]」里 = 外服 = 无论 Discord 给没给锁标记都接手。
+           * 【吃不准就不动】gwState=own/unknown 且 Discord 没标锁 → 交回原生。
+           *   面板一开 gwWarmAll 就把这些 id 暖好了, 点到时基本都有结论。 */
+          const gw = gwState('emoji', id);
+          /* 【通杀判据】网关集合: id 不在「我加入的服务器的 emojis[]」里 = 外服。
+           * 【但 Discord 自己的信号优先生效方向】伙伴服/加成服的表怃我们能用,
+           *   却不在我们的 Set 里 → 拿 gw 单独接手会降级成链。所以再加一道
+           *   「见过它渲染成图 (emoGood)」否决: 真能用的不碰。 */
+          const nm0 = (host.dataset && host.dataset.name) || '';
+          if (!emojiLocked(host) && !(gw === 'foreign' && nm0 && !emoGood[nm0])) {
+            stamp('hijack', 'emoji:free'); return;                            // 能用的/吃不准的 → 交回原生
+          }
           const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
@@ -2188,6 +2314,81 @@
     if (!ext) return null;
     return 'https://media.discordapp.net/stickers/' + id + '.' + ext + '?size=160';
   }
+  /* ══════════════ 贴纸/表情的【复制为链接】钮 ══════════════
+   * 主人报的缺口: Discord 对贴纸【没有任何复制入口】—— 右键只有「复制图片」
+   * 「复制消息链接」, 想拿它的图链只能自己 F12 抓。
+   * 而贴纸本质就是 media.discordapp.net 上一张公开图 (实测 206 OK、无需凭证),
+   * 表情同理在 cdn.discordapp.com/emojis/。补一个钮, 复制出去直接就是
+   * `[. ](URL)` —— 粘到哪都是一个点 + 图。
+   * 【事件顺序很关键】我们的接手监听在 document 捕获阶段 (最早), 而
+   *   stopPropagation 在捕获阶段一叫, 事件就到不了钮 (target) ——
+   *   所以两个接手监听开头都先 `if (t.closest('.moe-copy')) return;`,
+   *   让钮自己的 click 里 stop (那才是正确的位置)。 */
+  const COPY_CSS =
+    '.moe-copy{position:absolute;right:2px;bottom:2px;z-index:20;min-width:18px;height:18px;' +
+    'padding:0 4px;border:0;border-radius:4px;background:rgba(0,0,0,.66);color:#fff;' +
+    'font:11px system-ui,sans-serif;line-height:18px;cursor:pointer;opacity:.5}' +
+    '.moe-copy:hover{opacity:1;background:#1e6fd9}' +
+    '.moe-copy[data-moe-copy="done"]{background:rgba(35,165,90,.92);opacity:1}';
+  function ensureCopyStyle() {
+    try {
+      if (document.getElementById('moe-copy-css')) return;
+      const st = document.createElement('style');
+      st.id = 'moe-copy-css';
+      st.textContent = COPY_CSS;
+      (document.head || document.documentElement).appendChild(st);
+    } catch (e) {}
+  }
+  function ensureCopyButton(host, url) {
+    if (!host || !url || host.querySelector(':scope > .moe-copy')) return;
+    try {
+      const cs = window.getComputedStyle ? getComputedStyle(host) : null;
+      if (!cs || cs.position === 'static') host.style.position = 'relative';
+      const b = document.createElement('button');
+      b.className = 'moe-copy';
+      b.type = 'button';
+      b.textContent = '🔗';
+      b.title = '复制为 [. ](链接) 格式';
+      b.setAttribute('data-moe-url', url);
+      b.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();                 // 不让 Discord 与我们的接手看见
+        copyText(linkText(url)).then((ok) => {
+          b.textContent = ok ? '✓' : '✗';
+          if (ok) b.setAttribute('data-moe-copy', 'done');
+          stamp('copy', ok ? 'ok' : 'fail');
+          setTimeout(() => { try { b.textContent = '🔗'; b.removeAttribute('data-moe-copy'); } catch (e) {} }, 900);
+        });
+      });
+      host.appendChild(b);
+    } catch (e) {}
+  }
+  function addCopyButtons() {
+    ensureCopyStyle();
+    try {
+      /* ① 表情面板里的表情格 (不管能不能发, 想复制哪个都行) */
+      for (const b of document.querySelectorAll('button[data-type="emoji"][data-id]')) {
+        ensureCopyButton(b, emojiCdnUrl(b.dataset.id, b.getAttribute('data-animated') === 'true'));
+      }
+      /* ② 贴纸面板里的贴纸格 —— 主人点名的缺口 */
+      for (const el of document.querySelectorAll('[data-type="sticker"][data-id]')) {
+        const ent = stickerEntity(el);
+        const url = stickerCdnUrl(el.dataset.id, el.dataset.formatType || (ent && ent.format_type));
+        if (!url) continue;                                  // Lottie 发链没意义
+        const node = el.querySelector('[class*="stickerNode"]');
+        ensureCopyButton((node && node.parentElement) || el, url);
+      }
+      /* ③ 消息里已经发出来的贴纸 (别人发的外服贴纸也能一键拿链) */
+      for (const im of document.querySelectorAll('img[src*="/stickers/"]')) {
+        const host = im.closest('[class*="messageContent_"], [class*="imageWrapper"], [class*="attachment"], [class*="embed"]') || im.parentElement;
+        if (!host || !host.appendChild) continue;
+        let url = String(im.src).replace(/([?&])size=\d+/, '$1size=160');
+        if (url.indexOf('size=') < 0) url += (url.indexOf('?') >= 0 ? '&' : '?') + 'size=160';
+        ensureCopyButton(host, url);
+      }
+    } catch (e) {}
+  }
+
   /** 从 React fiber 读贴纸实体 (DOM 上拿不到 guild_id) */
   function stickerEntity(el) {
     try {
@@ -2212,13 +2413,19 @@
           if (!t || !t.closest) return;
           const el = t.closest('[data-type="sticker"], [class*="sticker_"][data-id]');
           if (!el || !el.dataset || !el.dataset.id) return;
+          if (t.closest('.moe-copy')) return;              // 同上
           /* 【锁定判定以 stickerUnsendable 为主】
            * Discord 自己就把“发不了”的贴纸标上 stickerUnsendable (带 grayscale 滤镜),
            * 这比我们拿 guild_id 自己推更准 —— 实测有贴纸虽然 guild_id 不同但仍可发
            * (9 张里有 2 张不一致)。guild_id 只作辅助。 */
           const node = el.querySelector('[class*="stickerNode"]') || el.closest('[class*="stickerNode"]');
           const unsendable = !!(node && /stickerUnsendable/.test(node.getAttribute('class') || ''));
-          if (!unsendable) { stamp('hijack', 'sticker:free'); return; }   // Discord 说能发 → 交回原生
+          const sid = el.dataset ? el.dataset.id : '';
+          const gw = gwState('sticker', sid);
+          /* 【优先级】unsendable 是权威 (Discord 自己标的「这个我发不了」);
+           * gw 只补一个洞: 不在我的 stickers[] 集合里且【没在消息里见过它当图用】
+           * 才接手 —— 伙伴/加成服的贴纸不在我的集合但确实能用, stGood 挡住它。 */
+          if (!unsendable && !(gw === 'foreign' && !stGood[sid])) { stamp('hijack', 'sticker:free'); return; }
           const ent = stickerEntity(el);
           const fmt = el.dataset.formatType || (ent && ent.format_type) || 1;
           const url = stickerCdnUrl(el.dataset.id, fmt);
@@ -2256,7 +2463,13 @@
       /* 名单不需要每轮都重扫 (80 条消息的 DOM), 2.4s 一次就够;
        * chip 转换很轻 (输入拢一共几张), 每轮都跑。 */
       emoTick = (emoTick + 1) % 2;
-      if (emoTick === 0) scanEmojiRender();
+      gwWarmAll();                                    // 面板/输入框里的 id 暖好 → 点击时同步出结论
+      if (emoTick === 0) {
+        scanEmojiRender();
+        addCopyButtons();                                 // 贴纸/表情的复制钮
+        stamp('gw', 'g=' + gwStats.g + ' e=' + gwStats.e + ' s=' + gwStats.s +
+          (gwStats.p >= 0 ? ' nitro=' + gwStats.p : '') + (gwSettled ? '' : ' booting'));
+      }
       convertBrokenEmojiChips();
     } catch (e) { stamp('err', 'loop:' + e.message); }
     setTimeout(loop, 1200);

@@ -1042,7 +1042,7 @@
   }
   /* 调试/仿真入口。v3.7.12 之前只挂在非扩展分支上 —— 带 shim 的形态里
    * EXT 为真, 仿真台/面板就什都拿不到, 提到分支外两种形态都有。 */
-    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, emojiLocked, fiberLockBag, addCopyButtons, copyText, emojiUrl: emojiCdnUrl, rawToken: rawEmojiToken, get decisions() { return decisions.slice(); }, get cfg() { return cfg; } };
+    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, addCopyButtons, copyText, emojiUrl: emojiCdnUrl, rawToken: rawEmojiToken, get decisions() { return decisions.slice(); }, get cfg() { return cfg; } };
 
   /* ---------- 移除举报入口 (主人要求: 整个 Discord 界面去掉举报) ---------- */
   const REPORT_KEYWORDS = ['report', '举报', '報告', '申告'];
@@ -1864,10 +1864,17 @@
     return Promise.resolve(copyFallback(text));
   }
 
-  /* ---------- 表情链接化: 两条通道, 各司其职 ----------
-   * 【通道 A · 表情栏】只有 Discord 判为「上锁」的格子才接手 → 插 `[. ](图链)`;
-   *   能用的表情一律交回 Discord 原生。 (主人 2026-11-16: 「表情栏给我改回去,
-   *   只有上锁的才用链接发送」)
+  /* ---------- 表情链接化: 两条通道, 各自干什么 ----------
+   * 【通道 A · 表情栏】点**任何**自定义表情格子 (带 `data-id`) → 一律插 `[. ](图链)`
+   *   + 自动收起面板；Discord 那条原生路整段不给跑。
+   *   (主人 2026-11-16 重述全部要求: 「我只是让你点击表情后, 自动关闭表情栏,
+   *   还要把表情换成格式链接」)
+   *   【为什么不按 isLocked 分流】实页一手证据: 主人点一颗外服表情, 我们读到
+   *   `data-hijack=emoji:free` (Discord 标它 isLocked=false) → 放行走原生 →
+   *   当场弹「使用 Nitro 解锁所有表情符号 / 仅限 Nitro」会员弹窗。
+   *   要 Nitro 的外服表情在面板里根本不标锁 —— 按锁分流必然漏, 而漏掉的恰好
+   *   就是要解决的那一类。一律接手反而不需要判断得对。
+   *   标准 unicode 表情没有 `data-id` → 不接手 (它们本来就能直接发)。
    * 【通道 B · 聊天里别人发的外服表情】不靠点表情栏, 直接在消息上给一个复制钮:
    *   点一下剪贴板里就是 `[. ](图链)` —— 这才是主人从始至终要的那件事。
    *   渲染成图的 (有 data-id) 与渲染成字面 `:名字:` 的 (Discord 自己解析不了,
@@ -1882,15 +1889,7 @@
 
   let emoTick = 0;                             // 每两轮主循环做一次 DOM 扫描
 
-  /** 输入栏里逐个换: 一次只动一张 chip, 换完重新查 DOM。
-   * 【为何不能一次批量换完】React/Slate 一改内容就重绘整段,
-   *   手里拿着的后面几个 chip 引用当场作废 —— 轻则没换到,
-   *   重则在错位置插一发。串行 + 每轮重查 + emoBusy 防重入, 多张叠着也对。
-   * 【为何是就地】光标放在 chip 后面删 → 选区停在删除点 → 贴回去就在原位,
-   *   输入栏里其他文字与其他表情一律不动。 */
-  let emoBusy = false;
-
-  /* ---------- 点击劫持: 被锁的表情改成插入 CDN 图链接 ----------
+  /* ---------- 点击接手: 表情一律换成 CDN 图链接 ----------
    * 为何不能插 :name: 或 <:name:id> —— 主人实测过:
    *   两种写法发出去服务端都不解析 (外部/动图表情需 Nitro),
    *   对方只看到字面文本。
@@ -1964,40 +1963,6 @@
     if (item.matches && item.matches('button[data-type="emoji"]')) return item;
     return (item.querySelector && item.querySelector('button[data-type="emoji"]')) || item;
   }
-  /* ---------- 「这颗格子 Discord 判它能用吗」 ----------
-   * 2026-11-16 实页一手证据: 表情格子的 fiber 上摆着
-   *   props.children.props = {emoji:{guildId,id,animated,name,available,roles,…},
-   *                           isLocked:<bool>, allowAnimatedEmoji:<bool>, size, …}
-   * isLocked 是 Discord 自己算完的结论 (外服 / 跨服务器使用 / 动图要会员 / 角色限制
-   * 全在里面) —— 比猜 DOM 的 aria-disabled/锁图标可靠 (猜法实测把本服静态表情
-   * 当成锁着, 误换成链)。拿不到 fiber 才退回 DOM 猜法。 */
-  function fiberLockBag(el) {
-    try {
-      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
-      let f = fk ? el[fk] : null;
-      for (let i = 0; i < 5 && f; i++) {
-        for (const p of [f.memoizedProps, f.pendingProps]) {
-          if (!p) continue;
-          if (p.emoji && (p.emoji.id || p.emoji.guildId)) return p;
-          const c = p.children && p.children.props;
-          if (c && c.emoji && (c.emoji.id || c.emoji.guildId)) return c;
-        }
-        f = f.return;
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  function emojiLocked(host) {
-    if (!host) return false;
-    const bag = fiberLockBag(host);
-    if (bag && typeof bag.isLocked === 'boolean') return bag.isLocked;   // Discord 说了算
-    /* 【兜底 = 旧版那套 DOM 猜法】fiber 结构换了至少不至于整个「解锁」功能失效 */
-    if (host.getAttribute && host.getAttribute('aria-disabled') === 'true') return true;
-    if (host.querySelector && host.querySelector('[class*="emojiLockIcon"], [class*="lockIcon"], [class*="lockedIcon"]')) return true;
-    return false;
-  }
-
   function hijackEmojiClicks() {
     try {
       document.addEventListener('click', (e) => {
@@ -2010,9 +1975,15 @@
           const host = emojiHost(item);
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
-          /* 【只有上锁的才接手 —— 主人原话: 「表情栏给我改回去, 只有上锁的才用
-           * 链接发送」】能用的表情一律交回 Discord 原生, 我们不插手。 */
-          if (!emojiLocked(host)) { stamp('hijack', 'emoji:free'); return; }
+          /* 【一律接手, 不看锁没锁】主人 2026-11-16 把要求重述成一句:
+           *   「我只是让你点击表情后, 自动关闭表情栏, 还要把表情换成格式链接」
+           * 【为什么不能按 isLocked 分流 —— 实页一手证据】主人点一颗外服表情,
+           *   我们读到 data-hijack=emoji:free (Discord 标它 isLocked=false) → 放行
+           *   走原生 → 当场弹出「使用 Nitro 解锁所有表情符号 / 仅限 Nitro」会员弹窗。
+           *   即【要 Nitro 的外服表情在面板里根本不标锁】, 按锁分流必然漏,
+           *   而漏掉的恰好就是主人要解决的那一类。
+           * 【接手 = preventDefault + stopPropagation(捕获阶段)】Discord 那条原生路
+           *   整段不跑 → 会员弹窗从结构上不可能出现, 不需要判断得对。 */
           const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();

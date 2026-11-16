@@ -460,8 +460,13 @@
   cbox.focus();
   fr1.click();
   await sleep(600);
-  ok('没锁的格子不接手 (不插链接, 交回 Discord 原生)', cbox.textContent === before2,
-    JSON.stringify(cbox.textContent.slice(before2.length, before2.length + 60)) +
+  /* 【一律接手】没锁的格子 (fr1: 无 isLocked、无锁图标、无 aria-disabled)
+   * 也必须接手 —— 实页证明「要 Nitro 的外服表情」在面板里就是不标锁,
+   * 放行走原生就当场弹会员 (主人 2026-11-16 的截图事故)。 */
+  ok('【一律接手】没有任何锁标记的格子也插 [. ](短链) (旧版放行走原生 → 弹会员)',
+    cbox.textContent.slice(before2.length).indexOf(
+      '[. ](https://cdn.discordapp.com/emojis/1571549979754111046.webp?size=96)') >= 0,
+    JSON.stringify(cbox.textContent.slice(before2.length, before2.length + 90)) +
     ' hijack=' + (document.getElementById('__moe_diag') || { dataset: {} }).dataset.hijack);
 
   /* 标准 unicode 表情格 (无 data-id) → 不接手 */
@@ -477,14 +482,21 @@
   ok('没有 data-id 的格子 (标准 unicode 表情) 不接手', cbox.textContent === b3,
     JSON.stringify(cbox.textContent.slice(b3.length, b3.length + 40)));
 
-  /* ---------- 12. 「上锁」以 Discord 自己的 isLocked 为准 (fiber), DOM 猜法只兜底 ---------- */
+  /* ---------- 12. 原生那条路必须整段跑不了 (= 会员弹窗不可能出现) ----------
+   * 真 Discord 的「点表情 → 弹 Nitro 会员」是挂在格子上的原生 click 监听。
+   * 我们在 document 捕获阶段 preventDefault + stopPropagation, 所以:
+   *   · 原生监听一次都不该被调用 (下面用假原生监听器模拟它)
+   *   · 事件 defaultPrevented = true
+   * 这条比「判得准不准」重要: 一律接手 = 不需要判得对。
+   */
   const grid12 = trap.querySelector('.emojiPicker_ccc');
+  window.__upsell = 0;                       // 假的 Discord 会员弹窗计数器
   const mkFiberTile = (id, name, locked) => {
     const btn = document.createElement('button');
     btn.setAttribute('data-type', 'emoji');
     btn.dataset.id = id; btn.dataset.name = name;
     btn.setAttribute('data-animated', 'false');
-    /* 真 Discord 的形状: fiber.memoizedProps.children.props = {emoji, isLocked, allowAnimatedEmoji} */
+    /* 真 Discord 的形状: fiber.memoizedProps.children.props = {emoji, isLocked, …} */
     btn.__reactFiber$harness = {
       memoizedProps: { children: { props: {
         emoji: { id: id, name: name, guildId: '9900000000000000001', animated: false, require_colons: true, available: true, roles: [] },
@@ -492,29 +504,40 @@
       } } },
       pendingProps: null, return: null,
     };
+    /* 模拟 Discord 自己的原生处理 (它才是弹会员框的那个) */
+    btn.addEventListener('click', () => { window.__upsell++; });
     grid12.appendChild(btn);
     return btn;
   };
-  const fbLock = mkFiberTile('1800000000000000001', 'fiber_locked', true);
-  const fbFree = mkFiberTile('1800000000000000002', 'fiber_free', false);
-  ok('fiber 的 isLocked 能直接读出来 (Discord 说了算)',
-    window.__MoeUI.emojiLocked(fbLock) === true && window.__MoeUI.emojiLocked(fbFree) === false,
-    'locked=' + window.__MoeUI.emojiLocked(fbLock) + ' free=' + window.__MoeUI.emojiLocked(fbFree));
+  const tFree = mkFiberTile('1800000000000000002', 'fiber_free', false);   // Discord 说不锁
+  const tLock = mkFiberTile('1800000000000000001', 'fiber_locked', true);  // Discord 说锁
+  let prevented = null;
+  tFree.addEventListener('click', (e) => { prevented = e.defaultPrevented; });  // 冒泡阶段读不到就被拦了
   const b12 = cbox.textContent;
   trap.style.display = '';
   cbox.focus();
-  fbLock.click();
+  tFree.click();
   await sleep(600);
-  ok('【只有上锁的才接手】DOM 上没有任何锁标记、但 Discord 判 isLocked=true → 插链',
-    cbox.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/1800000000000000001.webp?size=96)') >= 0,
+  ok('【一律接手】isLocked=false 的格子也接手 (不再按锁分流)',
+    cbox.textContent.slice(b12.length).indexOf('[. ](https://cdn.discordapp.com/emojis/1800000000000000002.webp?size=96)') >= 0,
     JSON.stringify(cbox.textContent.slice(b12.length, b12.length + 90)));
-  const b12b = cbox.textContent;
+  ok('【会员弹窗从结构上不可能】原生 click 监听一次都没被调用 (被捕获阶段拦死)',
+    window.__upsell === 0, '假原生调用次数=' + window.__upsell);
+  const b12c = cbox.textContent;
   trap.style.display = '';
   cbox.focus();
-  fbFree.click();
+  tLock.click();
   await sleep(600);
-  ok('isLocked=false 的格子一律不碰 (旧版猜 DOM 会把本服表情误换成链)',
-    cbox.textContent === b12b, JSON.stringify(cbox.textContent.slice(b12b.length, b12b.length + 70)));
+  ok('isLocked=true 的格子同样接手 (两条路合一条, 没有分支就没有漏)',
+    cbox.textContent.slice(b12c.length).indexOf('[. ](https://cdn.discordapp.com/emojis/1800000000000000001.webp?size=96)') >= 0 &&
+    window.__upsell === 0,
+    '新增文本=' + JSON.stringify(cbox.textContent.slice(b12c.length, b12c.length + 60)) + ' 原生调用=' + window.__upsell);
+  ok('锁信号判定代码已整块删除 (emojiLocked / fiberLockBag 不存在)',
+    !window.__MoeUI.emojiLocked && !window.__MoeUI.fiberLockBag,
+    JSON.stringify(Object.keys(window.__MoeUI).filter((k) => /lock|Lock/.test(k))));
+  ok('接手后面板自动收起 (主人点名要的那个动作)', trap.style.display === 'none',
+    'display=' + trap.style.display);
+
 
   /* ---------- 13. 输入框不再被劫持 (上一版连能用的表情都降级, 主人否掉了) ---------- */
   const cbox13 = document.getElementById('composer');

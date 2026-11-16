@@ -453,18 +453,18 @@
   ok('Shift+点 → 面板不关 (跟原生一样留着连续挑)', pickerOpen(), 'open=' + pickerOpen());
   trap.style.display = 'none';
 
-  /* 【新语义】没锁的表情也一律接手 —— 主人拍板「提取链接、以网址链接形式发送,
-   * 不走原生路线」, 与上面那颗锁着的动图完全同一条路 */
+  /* 【改回去了】没锁的格子一律交回 Discord 原生 —— 主人原话:
+   * 「表情栏给我改回去, 只有上锁的才用链接发送」 */
   const before2 = cbox.textContent;
   trap.style.display = '';
   cbox.focus();
   fr1.click();
   await sleep(600);
-  const add2 = cbox.textContent.slice(before2.length);
-  ok('没锁的静态表情也插 [. ](短链) (不再交回原生)',
-    add2.indexOf('[. ](https://cdn.discordapp.com/emojis/1571549979754111046.webp?size=96)') >= 0,
-    JSON.stringify(add2.slice(0, 90)) + ' hijack=' + (document.getElementById('__moe_diag') || { dataset: {} }).dataset.hijack);
-  /* 标准 unicode 表情格: Discord 自己就不给 data-id → 我们不接手 */
+  ok('没锁的格子不接手 (不插链接, 交回 Discord 原生)', cbox.textContent === before2,
+    JSON.stringify(cbox.textContent.slice(before2.length, before2.length + 60)) +
+    ' hijack=' + (document.getElementById('__moe_diag') || { dataset: {} }).dataset.hijack);
+
+  /* 标准 unicode 表情格 (无 data-id) → 不接手 */
   const plain = document.createElement('button');
   plain.setAttribute('data-type', 'emoji');
   plain.textContent = '🙂';
@@ -474,169 +474,171 @@
   cbox.focus();
   plain.click();
   await sleep(600);
-  ok('没有 data-id 的格子 (标准 unicode 表情) 不接手, 也不插链接',
-    cbox.textContent === b3, JSON.stringify(cbox.textContent.slice(b3.length, b3.length + 40)));
+  ok('没有 data-id 的格子 (标准 unicode 表情) 不接手', cbox.textContent === b3,
+    JSON.stringify(cbox.textContent.slice(b3.length, b3.length + 40)));
 
-  /* ---------- 12. 外服表情: 输入栏里的 chip 就地换成短链 ---------- */
-  const ui12 = window.__MoeUI || {};
-  const cbox2 = document.getElementById('composer');
-  cbox2.innerHTML = '';
-  const put = (s) => cbox2.appendChild(document.createTextNode(s));
-  const mkChip = (id, name) => {
+  /* ---------- 12. 「上锁」以 Discord 自己的 isLocked 为准 (fiber), DOM 猜法只兜底 ---------- */
+  const grid12 = trap.querySelector('.emojiPicker_ccc');
+  const mkFiberTile = (id, name, locked) => {
+    const btn = document.createElement('button');
+    btn.setAttribute('data-type', 'emoji');
+    btn.dataset.id = id; btn.dataset.name = name;
+    btn.setAttribute('data-animated', 'false');
+    /* 真 Discord 的形状: fiber.memoizedProps.children.props = {emoji, isLocked, allowAnimatedEmoji} */
+    btn.__reactFiber$harness = {
+      memoizedProps: { children: { props: {
+        emoji: { id: id, name: name, guildId: '9900000000000000001', animated: false, require_colons: true, available: true, roles: [] },
+        isLocked: locked, allowAnimatedEmoji: true, size: 40,
+      } } },
+      pendingProps: null, return: null,
+    };
+    grid12.appendChild(btn);
+    return btn;
+  };
+  const fbLock = mkFiberTile('1800000000000000001', 'fiber_locked', true);
+  const fbFree = mkFiberTile('1800000000000000002', 'fiber_free', false);
+  ok('fiber 的 isLocked 能直接读出来 (Discord 说了算)',
+    window.__MoeUI.emojiLocked(fbLock) === true && window.__MoeUI.emojiLocked(fbFree) === false,
+    'locked=' + window.__MoeUI.emojiLocked(fbLock) + ' free=' + window.__MoeUI.emojiLocked(fbFree));
+  const b12 = cbox.textContent;
+  trap.style.display = '';
+  cbox.focus();
+  fbLock.click();
+  await sleep(600);
+  ok('【只有上锁的才接手】DOM 上没有任何锁标记、但 Discord 判 isLocked=true → 插链',
+    cbox.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/1800000000000000001.webp?size=96)') >= 0,
+    JSON.stringify(cbox.textContent.slice(b12.length, b12.length + 90)));
+  const b12b = cbox.textContent;
+  trap.style.display = '';
+  cbox.focus();
+  fbFree.click();
+  await sleep(600);
+  ok('isLocked=false 的格子一律不碰 (旧版猜 DOM 会把本服表情误换成链)',
+    cbox.textContent === b12b, JSON.stringify(cbox.textContent.slice(b12b.length, b12b.length + 70)));
+
+  /* ---------- 13. 输入框不再被劫持 (上一版连能用的表情都降级, 主人否掉了) ---------- */
+  const cbox13 = document.getElementById('composer');
+  cbox13.innerHTML = '';
+  const put = (t) => cbox13.appendChild(document.createTextNode(t));
+  const mkChip = (id, name, animated) => {
     const im = document.createElement('img');
     im.className = 'emoji';
     im.setAttribute('data-type', 'emoji');
     im.setAttribute('data-id', id);
     im.setAttribute('alt', ':' + name + ':');
-    im.src = 'https://cdn.discordapp.com/emojis/' + id + '.webp?size=44';
-    cbox2.appendChild(im);
+    im.src = 'https://cdn.discordapp.com/emojis/' + id + (animated ? '.gif' : '.webp') + '?size=44';
+    cbox13.appendChild(im);
     return im;
   };
-  /* 文字 + 表情 + 文字 + 表情 + 文字 + 表情 + 文字 —— 三张全转, 各自就位 */
-  put('甲'); const badChip = mkChip('1397468110776172654', 'bad_emote');
-  put('乙'); const goodChip = mkChip('999000', 'good_emote');
-  put('丙'); const badChip2 = mkChip('1397468110776172655', 'bad_emote2');
-  put('丁');
-  cbox2.focus();
-  await sleep(5000);                       // 等 loop 跑几轮 (每轮串行换一张)
-  const txt12 = cbox2.textContent;
-  const L1 = '[. ](https://cdn.discordapp.com/emojis/1397468110776172654.webp?size=96)';
-  const L2 = '[. ](https://cdn.discordapp.com/emojis/1397468110776172655.webp?size=96)';
-  const LG = '[. ](https://cdn.discordapp.com/emojis/999000.webp?size=96)';
-  ok('【一律转链】三张 chip 全被换成链接 (含本来能原生发的那张)',
-    !badChip.isConnected && !goodChip.isConnected && !badChip2.isConnected &&
-    txt12.indexOf(L1) >= 0 && txt12.indexOf(LG) >= 0 && txt12.indexOf(L2) >= 0,
-    'b1=' + badChip.isConnected + ' g=' + goodChip.isConnected + ' b2=' + badChip2.isConnected);
-  ok('三张各自换在自己的位置上 (甲 L1 乙 LG 丙 L2 丁 顺序不乱)',
-    (function () {
-      const ix = ['甲', L1, '乙', LG, '丙', L2, '丁'].map((x) => txt12.indexOf(x));
-      return ix.every((v) => v >= 0) && ix.every((v, k) => k === 0 || v > ix[k - 1]);
-    })(), txt12);
-  ok('第一张换在自己的位置上',
-    txt12.indexOf('甲') >= 0 && txt12.indexOf(L1) > txt12.indexOf('甲') && txt12.indexOf('乙') > txt12.indexOf(L1),
-    txt12);
-  ok('第二张换在自己的位置上',
-    txt12.indexOf(L2) > txt12.indexOf('乙') && txt12.indexOf('丁') > txt12.indexOf(L2), txt12);
-  ok('原有文字没被整体覆盖', ['甲', '乙', '丙', '丁'].every((x) => txt12.indexOf(x) >= 0), txt12);
-
-  /* 防刷屏: 再插一张同一个表情 → 应该只多一个链接, 不能每 1.2s 重贴一次 */
-  const cnt = (s, sub) => s.split(sub).length - 1;
-  put('戊'); const again3 = mkChip('1397468110776172654', 'bad_emote');
-  cbox2.focus();
-  await sleep(4000);
-  const txt13 = cbox2.textContent;
-  ok('同一表情再插一次只多一个链接 (不会每轮重贴刷屏)',
-    cnt(txt13, L1) === 2 && !again3.isConnected,
-    'L1 个数=' + cnt(txt13, L1) + ' chip 还在=' + again3.isConnected);
-
-  /* ---------- 13. 一律转链之后: 门禁必须真的拆干净 + 面板/贴纸/复制钮 ---------- */
-  const ui13 = window.__MoeUI || {};
-  const diag13 = document.getElementById('__moe_diag') || { dataset: {} };
-  const cbox13 = document.getElementById('composer');
-  ok('【拆除确认】hook 不再碰页面的 JSON.parse (无 __moeGw、无 data-gw)',
-    typeof window.__moeGw === 'undefined' && !diag13.dataset.gw,
-    '__moeGw=' + typeof window.__moeGw + ' data-gw=' + JSON.stringify(diag13.dataset.gw));
-  ok('【拆除确认】可用性判定 API 一个都不剩',
-    !ui13.probeUsable && !ui13.tileLockInfo && !ui13.gwState && !ui13.gwWarmAll &&
-    !ui13.verdicts && !ui13.harvestDescriptors && !ui13.scanEmojiRender && !ui13.emo,
-    JSON.stringify(Object.keys(ui13).filter((k) => /probe|tile|gw|verdict|harvest|scanEmoji|^emo$/.test(k))));
-
-  /* 面板格子: 不看锁没锁, data-animated 只决定扩展名 */
-  const trap13 = document.getElementById('picker-trap');
-  const grid13 = trap13.querySelector('.emojiPicker_ccc');
-  const mkTile = (id, name, animated) => {
-    const btn = document.createElement('button');
-    btn.setAttribute('data-type', 'emoji');
-    btn.dataset.id = id; btn.dataset.name = name;
-    btn.setAttribute('data-animated', animated ? 'true' : 'false');
-    grid13.appendChild(btn);
-    return btn;
-  };
-  const trg13 = document.getElementById('emoji-trigger');
-  const openPick = () => { trap13.style.display = ''; cbox13.focus(); };
-  const tAnim = mkTile('1700000000000000001', 'any_animated', true);
-  const tStill = mkTile('1700000000000000002', 'any_static', false);
-  let bb = cbox13.textContent; openPick(); tAnim.click(); await sleep(600);
-  ok('动图格子 → 插 .gif 链接 (不判可用性)',
-    cbox13.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/1700000000000000001.gif?size=96)') >= 0,
-    JSON.stringify(cbox13.textContent.slice(bb.length).slice(0, 90)));
-  bb = cbox13.textContent; openPick(); tStill.click(); await sleep(600);
-  ok('静态格子 → 插 .webp 链接',
-    cbox13.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/1700000000000000002.webp?size=96)') >= 0,
-    JSON.stringify(cbox13.textContent.slice(bb.length).slice(0, 90)));
-  ok('点完面板自己关 (与原生一致)', trap13.style.display === 'none', 'display=' + trap13.style.display);
-
-  /* 复制进来的旧形态 chip (只有 class="emoji" + data-id, 没有 data-type) 也要转 */
-  cbox13.innerHTML = '';
-  const legacy = document.createElement('img');
-  legacy.className = 'emoji';
-  legacy.setAttribute('data-id', '1700000000000000003');
-  legacy.setAttribute('alt', ':legacy_form:');
-  legacy.src = 'https://cdn.discordapp.com/emojis/1700000000000000003.gif?size=44';
-  cbox13.appendChild(legacy);
+  put('甲'); const chipA = mkChip('1397468110776172654', 'rin_miao_full_angry', false);
+  put('乙'); const chipB = mkChip('999000', 'own_emote', true);
+  put('丙');
   cbox13.focus();
-  await waitUntil(() => !legacy.isConnected, 12000);
-  ok('【通杀】只带 class="emoji"+data-id 的 chip 也扫到并转链 (旧选择器通道没丢)',
-    !legacy.isConnected && cbox13.textContent.indexOf('[. ](https://cdn.discordapp.com/emojis/1700000000000000003.gif?size=96)') >= 0,
-    cbox13.textContent.slice(0, 110));
+  await sleep(6000);                                  // 够旧版跑 4~5 轮转换
+  const dot = String.fromCharCode(91) + '. ]';        // 避免在测试文本里写死方括号
+  ok('【撤销确认】输入框里的表情 chip 原样留着、文字一字不动 (转换机制已撤)',
+    cbox13.contains(chipA) && cbox13.contains(chipB) &&
+    cbox13.textContent === '甲乙丙' && cbox13.textContent.indexOf(dot) < 0,
+    JSON.stringify(cbox13.textContent));
+  ok('转换机制整条链已从代码里删除 (convertBrokenEmojiChips/composerChips 都不存在)',
+    !window.__MoeUI.convertBrokenEmojiChips && !window.__MoeUI.composerChips &&
+    !window.__MoeUI.chipUrlOf,
+    JSON.stringify(Object.keys(window.__MoeUI).filter((k) => /chip|convert|emo/i.test(k))));
 
-  /* 贴纸: 只给复制钮, 不抢点击 */
+  /* ---------- 14. 主人从始至终要的那件事: 聊天里别人发的外服表情 → 复制成链接 ---------- */
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
     writeText: (x) => { window.__copyLog = window.__copyLog || []; window.__copyLog.push(x); return Promise.resolve(); } } });
+  /* (a) 渲染成图的: Discord 给了 data-id */
+  const msgbox = document.getElementById('otherbox');
+  msgbox.innerHTML =
+    '<img class="emoji" data-type="emoji" data-id="1900000000000000021" alt=":foreign_img_emote:" ' +
+    'src="https://cdn.discordapp.com/emojis/1900000000000000021.gif?size=44">';
+  /* (b) 渲染成字面 :名字: 的: Discord 自己解析不了它 (= 正是发不出去那一类),
+   *     id 只能从同条消息的原始 content 里找回 (实页取证 fiber: baseMessage.content) */
+  const litSpan = document.createElement('span');
+  litSpan.textContent = ':rin_miao_full_angry:';
+  litSpan.__reactFiber$harness = {
+    memoizedProps: { baseMessage: { content: '看这个 <:rin_miao_full_angry:1397468110776172654> 好笑' }, children: null },
+    pendingProps: null, return: null,
+  };
+  msgbox.appendChild(litSpan);
+  /* (c) 字面 :名字: 但原始 content 里没这个 token → 找不回 id, 什么都不做 (不猜) */
+  const litNoId = document.createElement('span');
+  litNoId.textContent = ':nowhere_emote:';
+  litNoId.__reactFiber$harness = { memoizedProps: { baseMessage: { content: '纯文本没有 token' } }, return: null };
+  msgbox.appendChild(litNoId);
+  await sleep(3200);                                  // 等 addCopyButtons 跑一轮
+  const pillImg = msgbox.querySelector(':scope > .moe-copy');   // 图形态的钮挂在消息容器上, 字面形态的钮在 span 里
+  const pillLit = litSpan.querySelector(':scope > .moe-copy');
+  ok('【图形态】消息里渲染成图的外服表情长出 🔗',
+    !!pillImg && (pillImg.getAttribute('data-moe-url') || '').indexOf('emojis/1900000000000000021.gif?size=96') >= 0,
+    pillImg ? pillImg.getAttribute('data-moe-url') : 'no pill');
+  ok('【字面 :名字: 形态】按原始 content 找回 id 后也长出 🔗',
+    !!pillLit && pillLit.getAttribute('data-moe-url') === 'https://cdn.discordapp.com/emojis/1397468110776172654.webp?size=96',
+    (pillLit ? pillLit.getAttribute('data-moe-url') : 'no pill') +
+    ' | rawToken=' + JSON.stringify(window.__MoeUI.rawToken(litSpan, 'rin_miao_full_angry')));
+  ok('【不猜】找不回 id 的字面表情不长钮',
+    !litNoId.querySelector(':scope > .moe-copy'),
+    '钮数=' + litNoId.querySelectorAll('.moe-copy').length);
+  if (pillLit) {
+    window.__copyLog = [];
+    const bb2 = cbox13.textContent;
+    pillLit.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await sleep(400);
+    ok('点它 → 剪贴板里就是 [. ](图链) (逐字符)',
+      (window.__copyLog || [])[0] === '[. ](https://cdn.discordapp.com/emojis/1397468110776172654.webp?size=96)',
+      JSON.stringify((window.__copyLog || [])[0]));
+    ok('复制不会往输入框插任何东西', cbox13.textContent === bb2, JSON.stringify(cbox13.textContent));
+    ok('复制完钮变 ✓', pillLit.getAttribute('data-moe-copy') === 'done', pillLit.textContent);
+  }
+
+  /* 贴纸: 只给复制钮, 不抢点击 (主人拍板保留) */
   const sArea = document.createElement('div');
   sArea.innerHTML =
     '<div class="row_harness">' +
     '<div id="sA" data-type="sticker" data-id="1700000000000000011" data-format-type="1"><div class="stickerNode_x"></div></div>' +
-    '<div id="sB" data-type="sticker" data-id="1700000000000000012" data-format-type="1"><div class="stickerNode_x stickerUnsendable_y"></div></div>' +
     '</div>';
   document.body.appendChild(sArea);
-  /* 消息里渲染出来的表情 + 贴纸 (主人: 「在聊天中直接复制外服表情」就该直接是链接) */
-  document.getElementById('otherbox').innerHTML =
-    '<img class="emoji" data-type="emoji" data-id="1700000000000000021" alt=":msg_emote:" src="https://cdn.discordapp.com/emojis/1700000000000000021.gif?size=44">' +
-    '<img src="https://media.discordapp.net/stickers/1700000000000000022.png?size=160" alt="贴纸">';
-  await sleep(3000);                                    // 等 addCopyButtons 跑一轮
+  await sleep(3200);
   const pillA = document.getElementById('sA').querySelector('.moe-copy');
-  const pillLock = document.getElementById('sB').querySelector('.moe-copy');
-  ok('【贴纸复制钮】贴纸格上长出 🔗 (Discord 自己没这个入口), 标了发不了的也有',
-    !!pillA && !!pillLock, 'pillA=' + (pillA ? pillA.getAttribute('data-moe-url') : 'none'));
-  ok('【消息里的表情也有 🔗】别人发的外服表情可一键复制成链接格式',
-    (function () {
-      const im = document.querySelector('#otherbox img[data-type="emoji"]');
-      const host = im && im.parentElement;
-      const pl = host && host.querySelector ? host.querySelector('.moe-copy') : (im && im.parentNode.querySelector('.moe-copy'));
-      return !!pl && /emojis\/1700000000000000021\.gif\?size=96/.test(pl.getAttribute('data-moe-url') || '');
-    })(),
-    (function () {
-      const im = document.querySelector('#otherbox img[data-type="emoji"]');
-      const pl = im && im.parentNode.querySelector('.moe-copy');
-      return pl ? pl.getAttribute('data-moe-url') : 'no pill on 消息表情';
-    })());
-  if (pillA) {
-    window.__copyLog = [];
-    const b15 = cbox13.textContent;
-    pillA.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-    await sleep(400);
-    ok('点它复制的就是 [. ](贴纸图链) 格式 (逐字符)',
-      (window.__copyLog || [])[0] === '[. ](https://media.discordapp.net/stickers/1700000000000000011.png?size=160)',
-      JSON.stringify((window.__copyLog || [])[0]));
-    ok('点复制钮不会顺手把贴纸插进输入栏', cbox13.textContent === b15,
-      JSON.stringify(cbox13.textContent.slice(b15.length, b15.length + 60)));
-    ok('复制完钮会变 ✓', pillA.getAttribute('data-moe-copy') === 'done', pillA.textContent);
-  }
+  ok('贴纸格仍有 🔗 (Discord 自己没这个入口)', !!pillA,
+    'url=' + (pillA ? pillA.getAttribute('data-moe-url') : 'none'));
   const b16 = cbox13.textContent;
   document.getElementById('sA').click();
   await sleep(600);
-  ok('【按主人拍板】点贴纸不往输入框插东西 (只留复制钮)', cbox13.textContent === b16,
-    JSON.stringify(cbox13.textContent.slice(b16.length, b16.length + 70)));
-  /* 【别拿单个 id 当依赖】复制钮样式可能还没建 (addCopyButtons 每 2.4s 一轮) →
-   * 从全部 <style> 里找那段规则, 缺了就是缺了, 不要把整条用例炸掉 */
-  await waitUntil(() => /\.moe-copy\s*\{/.test(
-    [...document.querySelectorAll('style')].map((x) => x.textContent).join(String.fromCharCode(10))), 8000);
-  const copyCss = [...document.querySelectorAll('style')].map((x) => x.textContent).join(String.fromCharCode(10));
-  const rule = (/\.moe-copy\s*\{[^}]*\}/.exec(copyCss) || [''])[0];
-  ok('【钮位置】复制钮在左上角且默认不可见 (悬停才浮现, 不挡表情贴纸)',
-    /left:\s*2px/.test(rule) && /top:\s*2px/.test(rule) && !/right:/.test(rule) && /opacity:\s*0/.test(rule),
-    rule.slice(0, 150) || '没找到 .moe-copy 规则');
+  ok('点贴纸本身不往输入框插东西', cbox13.textContent === b16,
+    JSON.stringify(cbox13.textContent.slice(b16.length, b16.length + 60)));
+
+  /* 表情栏里的复制钮按主人要求去掉 */
+  ok('【表情栏无复制钮】表情格上不再有 🔗 (主人: 那个「表情栏的链接复制」去掉)',
+    (function () {
+      const tiles = [...document.querySelectorAll('button[data-type="emoji"]')];
+      return tiles.length > 0 && tiles.every((t) => !t.querySelector(':scope > .moe-copy'));
+    })(),
+    '格子数=' + document.querySelectorAll('button[data-type="emoji"]').length +
+    ' 带钮的格子=' + document.querySelectorAll('button[data-type="emoji"] > .moe-copy').length);
+  ok('【钮位置】复制钮在左上角且默认不浮现 (悬停才出现, 不挡图)',
+    (function () {
+      const css = [...document.querySelectorAll('style')].map((x) => x.textContent).join(String.fromCharCode(10));
+      const i2 = css.indexOf('.moe-copy');
+      const rule = i2 < 0 ? '' : css.slice(i2, css.indexOf('}', i2) + 1);
+      return rule.indexOf('left:2px') >= 0 && rule.indexOf('top:2px') >= 0 &&
+        rule.indexOf('right:') < 0 && rule.indexOf('opacity:0') >= 0;
+    })(), 'ok');
+
+  /* ---------- 15. 上一版那些机制必须真的拆干净 (不留死代码) ---------- */
+  const dg = document.getElementById('__moe_diag') || { dataset: {} };
+  const ui15 = window.__MoeUI || {};
+  ok('hook 不再碰页面的 JSON.parse (无 __moeGw、诊断面板无 data-gw)',
+    typeof window.__moeGw === 'undefined' && !dg.dataset.gw,
+    '__moeGw=' + typeof window.__moeGw + ' data-gw=' + JSON.stringify(dg.dataset.gw));
+  ok('门禁 API 一个不剩 (面板探针 / 集合客户端 / 渲染学习)',
+    !ui15.probeUsable && !ui15.tileLockInfo && !ui15.gwState && !ui15.gwWarmAll &&
+    !ui15.harvestDescriptors && !ui15.scanEmojiRender && !ui15.emo && !ui15.verdicts,
+    JSON.stringify(Object.keys(ui15).filter((k) => /probe|tile|gw|verdict|harvest|scanEmoji/.test(k))));
+  ok('没留下 data-moe-lock 这类死状态',
+    document.querySelectorAll('[data-moe-lock]').length === 0,
+    '残留=' + document.querySelectorAll('[data-moe-lock]').length);
 
   await report();
 })();

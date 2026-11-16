@@ -1042,7 +1042,7 @@
   }
   /* 调试/仿真入口。v3.7.12 之前只挂在非扩展分支上 —— 带 shim 的形态里
    * EXT 为真, 仿真台/面板就什都拿不到, 提到分支外两种形态都有。 */
-    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, convertBrokenEmojiChips, addCopyButtons, copyText, composerChips, chipUrlOf: chipEmojiUrl, get tried() { return Object.assign({}, emoTried); }, get decisions() { return decisions.slice(); }, get cfg() { return cfg; } };
+    window.__MoeUI = { scan: scanImages, badgeComposerPreviews, decodeUrlModal, decodeUrl, toOriginalUrl, isAttachment, reviewImage, tagAvatar, retagAll, downloadModal, enhanceLightbox, removeReportEls, unlockEmoji, emojiLocked, fiberLockBag, addCopyButtons, copyText, emojiUrl: emojiCdnUrl, rawToken: rawEmojiToken, get decisions() { return decisions.slice(); }, get cfg() { return cfg; } };
 
   /* ---------- 移除举报入口 (主人要求: 整个 Discord 界面去掉举报) ---------- */
   const REPORT_KEYWORDS = ['report', '举报', '報告', '申告'];
@@ -1864,146 +1864,23 @@
     return Promise.resolve(copyFallback(text));
   }
 
-  /* ---------- 自定义表情一律在输入栏里就地换成短链图 ----------
-   * 【规则 (主人 2026-11-16 拍板)】输入框里只要出现自定义表情的 chip
-   *   (Discord 自己渲染的 <img data-type="emoji" data-id alt=":name:">),
-   *   就把它的图链取出来、原地换成 `[. ](URL)` —— 不判它「能不能用」、
-   *   不走原生路线, 与表情栏里点一颗表情后我们做的事完全一致。
-   * 【一手证据 (为何原生路线对外服表情是坏的)】实页抓到的发送 body:
-   *   {"content":"<:rin_miao_full_angry:1397468110776172654>"}
-   *   → 渲染成 <span>:rin_miao_full_angry:</span> (没图); 同一时刻另两条
-   *   外服表情渲染成 img.emoji, 三条 CDN 全 200 —— 差别只在【我们这边的
-   *   客户端此刻能不能解析它】, 而这正是主人不想赌的东西。
-   * 【为什么在输入栏改而不是在发送时改 body】那样你根本看不见换了什么;
-   *   现在你在输入栏里当场看到一个点 + 图照旧出。
-   * 【为什么用 `[. ](URL)` 而不是裸 URL】短、不刷屏; 实弹 A/B 过:
-   *   裸 URL 与 `[. ](URL)` 的服务端 embed 完全一致 (都出 inlineMediaEmbed 96×96)。
-   * 【标准 unicode emoji 不碰】它们没有 data-id, 也不会有「发不出去」的问题。
+  /* ---------- 表情链接化: 两条通道, 各司其职 ----------
+   * 【通道 A · 表情栏】只有 Discord 判为「上锁」的格子才接手 → 插 `[. ](图链)`;
+   *   能用的表情一律交回 Discord 原生。 (主人 2026-11-16: 「表情栏给我改回去,
+   *   只有上锁的才用链接发送」)
+   * 【通道 B · 聊天里别人发的外服表情】不靠点表情栏, 直接在消息上给一个复制钮:
+   *   点一下剪贴板里就是 `[. ](图链)` —— 这才是主人从始至终要的那件事。
+   *   渲染成图的 (有 data-id) 与渲染成字面 `:名字:` 的 (Discord 自己解析不了,
+   *   正是发不出去那一类) 都覆盖; 后者按名字从同条消息的原始 content 里找回 id
+   *   (实页取证: fiber 上 f12.baseMessage.content = "<:pigpig:1507030922300620890>")。
+   * 【为什么不再改输入框里的 chip】上一版把「粘贴进来的表情」也一律换成链接,
+   *   结果连本来能原生发的表情都被降级 → 主人明确否掉。复制这一侧做掉之后,
+   *   输入框不需要任何劫持, 少一处会误伤的机制。
+   * 【格式为什么是 `[. ](URL)`】实弹 A/B: 与裸 URL 的服务端 embed 完全一致
+   *   (都出 inlineMediaEmbed 96×96), 但文本只有一个点, 不刷屏。
    */
-  const EMO_NAME = /^:([a-zA-Z0-9_]{2,64}):$/;
 
-  /* 名字 → 尝试失败次数 (上限见 findNextBrokenChip) */
-  const emoTried = Object.create(null);
-  let emoTick = 0;
-
-  /** 输入框里的所有表情 chip —— 只有这些会跟着消息发出去
-   * 【两条选择器通道都必须留】真 Discord 的 chip 带 data-type="emoji";
-   *  有的构建/形态只有 class="emoji" + data-id —— 少一条就一颗都扫不到,
-   *  整个「输入栏就地转链」静默失效 (本轮删代码时就丢过一次, 17 条用例齐红)。 */
-  function composerChips() {
-    const input = composerEl();
-    if (!input) return [];
-    const seen = new Set();
-    const out = [];
-    for (const el of input.querySelectorAll('img[data-type="emoji"][data-id], img.emoji[data-id]')) {
-      if (seen.has(el)) continue;
-      seen.add(el);
-      out.push(el);
-    }
-    return out;
-  }
-  /** chip 自己的 src 就是表情图地址; 只把尺寸提一档, 扩展名保持原样
-   * (外服表情在输入栏里用的就是 .webp, 动图也是动 webp —— 不用猜 gif) */
-  function chipEmojiUrl(img) {
-    const src = String((img.getAttribute && img.getAttribute('src')) || img.src || '');
-    if (!/discordapp\.(com|net)\/emojis\//.test(src)) return null;
-    const base = src.split('?')[0];
-    if (!/\.(gif|webp|png)$/i.test(base)) return null;
-    return base + '?size=96';
-  }
-
-  /* 【选 chip 本身不行 —— 实页实测三条插入通道全 all-failed】
-   * Discord 的表情 chip 包在 `<span data-slate-void="true" contenteditable="false">` 里,
-   * 选中一个不可编辑子树里的节点, Slate 根本不认这个选区。
-   *
-   * 【先删后贴也不得 —— 2026-11-16 实页另一起】data-emo=paste-fail:
-   *   chip 删掉了, 贴回却失败 → 用户的表情直接丢了。删了就不能反悔。
-   *
-   * 【改成先贴后删, 贴不上就不动】
-   *   ① 光标放在 chip 后面 (collapsed) → paste 把短链贴上去 (就在 chip 后面)
-   *   ② 确认文本真的落下来了 —— 没落下就直接 return, chip 一根毛都不碰
-   *   ③ 重新查那张 chip (React 可能换了节点), 光标放到它后面
-   *     → beforeinput deleteContentBackward (跟用户自己按退格同一条路)
-   *   结粠看: 文本在 chip 原位, chip 被退格掉 = 等价于就地替换。 */
-  function placeCaretAfter(node) {
-    const sel = window.getSelection && window.getSelection();
-    if (!sel || !node || !node.parentNode) return false;
-    const rg = document.createRange();
-    rg.setStartAfter(node);
-    rg.collapse(true);
-    sel.removeAllRanges();
-    sel.addRange(rg);
-    return true;
-  }
-
-  /** 重画后重新找那张 chip (同一 data-id + 同一 alt, 并且不是刚贴进去的文本) */
-  function findChipAgain(chip) {
-    const id = chip.getAttribute('data-id');
-    const alt = chip.getAttribute('alt');
-    const input = composerEl();
-    if (!input || !id) return null;
-    for (const el of input.querySelectorAll('img[data-type="emoji"]')) {
-      if (el.getAttribute('data-id') === id && el.getAttribute('alt') === alt) return el;
-    }
-    return null;
-  }
-
-  async function replaceChipWithText(chip, text) {
-    const input = composerEl();
-    if (!input || !chip) return false;
-    const anchor = (chip.closest && chip.closest('[data-slate-void="true"]')) || chip;
-    if (!anchor.parentNode) return false;
-    const IE = pageCtor('InputEvent');
-    const CE = pageCtor('ClipboardEvent');
-    const dt = pageDataTransfer(text);
-    if (!IE || !CE || !dt) return false;
-    const want = String(text).trim();
-    try { input.focus(); } catch (e) {}
-
-    /* ① 先贴 */
-    if (!placeCaretAfter(anchor)) { stamp('emo', 'no-caret'); return false; }
-    const pe = new CE('paste', pageInit({ bubbles: true, cancelable: true }));
-    try { Object.defineProperty(pe, 'clipboardData', { value: dt, configurable: true }); } catch (e) {}
-    input.dispatchEvent(pe);
-    await tick();
-    /* ② 没贴上去就收手 —— 绝不能先删 */
-    if (String(input.textContent || '').indexOf(want) < 0) { stamp('emo', 'paste-fail'); return false; }
-
-    /* ③ 再退格掉 chip */
-    const again = chip.isConnected ? chip : findChipAgain(chip);
-    if (again) {
-      const wrap2 = (again.closest && again.closest('[data-slate-void="true"]')) || again;
-      if (placeCaretAfter(wrap2)) {
-        input.dispatchEvent(new IE('beforeinput', pageInit({ bubbles: true, cancelable: true, inputType: 'deleteContentBackward' })));
-        await tick();
-      }
-      if (again.isConnected) { stamp('emo', 'del-fail(文本已贴, 保留原 chip)'); return false; }
-    }
-    stamp('emo', 'ok');
-    return true;
-  }
-
-  /** 下一个要接手的 chip：输入框里第一颗还没处理过的自定义表情 chip
-   * 【一律转链，不判可用性 —— 主人拍板原话】「就是让你提取表情链接，然后以网址
-   *   链接形式发送，不是要走原生上的路线，就像表情栏锁上表情解锁发送一样」
-   * 上一版那整套门禁（fiber 的 isLocked、网关 GUILD_CREATE 集合、面板搜索探针、
-   * 渲染学习）存在的唯一理由是「能用就别动」；主人要的是【别走原生】，所以门禁
-   * 整块删除。附带三个好处：没有可见副作用（不再开面板打字）、没有误判空间、
-   * 少约 250 行状态机。
-   * 【上限 3 次】paste 有可能实际已落文本但校验没对上 —— 每 1.2s 重贴会糊满屏。 */
-  function findNextBrokenChip() {
-    for (const chip of composerChips()) {
-      const m = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim());
-      if (!m) continue;                                              // 标准 emoji (无 :name:) 不碰
-      const name = m[1];
-      if (emoTried[name] >= 3) { chip.setAttribute('data-moe-emo', 'skip'); continue; }
-      if (chip.getAttribute('data-moe-emo')) continue;               // 试过 / 已放弃
-      if (!chipEmojiUrl(chip)) continue;
-      chip.setAttribute('data-moe-emo', 'done');                     // 先标记再动手，不会形循环
-      return chip;
-    }
-    return null;
-  }
+  let emoTick = 0;                             // 每两轮主循环做一次 DOM 扫描
 
   /** 输入栏里逐个换: 一次只动一张 chip, 换完重新查 DOM。
    * 【为何不能一次批量换完】React/Slate 一改内容就重绘整段,
@@ -2012,28 +1889,6 @@
    * 【为何是就地】光标放在 chip 后面删 → 选区停在删除点 → 贴回去就在原位,
    *   输入栏里其他文字与其他表情一律不动。 */
   let emoBusy = false;
-  async function convertBrokenEmojiChips() {
-    if (emoBusy) return;                     // 上一轮还在探/贴 → 不重入
-    emoBusy = true;
-    try {
-      for (let guard = 0; guard < 8; guard++) {
-        const chip = findNextBrokenChip();
-        if (!chip) break;
-        const url = chipEmojiUrl(chip);
-        const name = EMO_NAME.exec(String(chip.getAttribute('alt') || '').trim())[1];
-        const ok = await replaceChipWithText(chip, linkText(url) + ' ');
-        if (ok) { emoTried[name] = 0; chip.removeAttribute('data-moe-emo'); stamp('emo', 'ok:' + name); }
-        else {
-          emoTried[name] = (emoTried[name] || 0) + 1;
-          chip.setAttribute('data-moe-emo', 'fail' + emoTried[name]);
-          stamp('emo', 'retry:' + name + '#' + emoTried[name]);
-          break;                                          // 这轮收手, 下一轮再试
-        }
-        await tick();                                     // 等 Slate 重绘完再找下一张
-      }
-    } catch (e) { stamp('emo', 'err:' + String((e && e.message) || e).slice(0, 40)); }
-    emoBusy = false;
-  }
 
   /* ---------- 点击劫持: 被锁的表情改成插入 CDN 图链接 ----------
    * 为何不能插 :name: 或 <:name:id> —— 主人实测过:
@@ -2109,6 +1964,40 @@
     if (item.matches && item.matches('button[data-type="emoji"]')) return item;
     return (item.querySelector && item.querySelector('button[data-type="emoji"]')) || item;
   }
+  /* ---------- 「这颗格子 Discord 判它能用吗」 ----------
+   * 2026-11-16 实页一手证据: 表情格子的 fiber 上摆着
+   *   props.children.props = {emoji:{guildId,id,animated,name,available,roles,…},
+   *                           isLocked:<bool>, allowAnimatedEmoji:<bool>, size, …}
+   * isLocked 是 Discord 自己算完的结论 (外服 / 跨服务器使用 / 动图要会员 / 角色限制
+   * 全在里面) —— 比猜 DOM 的 aria-disabled/锁图标可靠 (猜法实测把本服静态表情
+   * 当成锁着, 误换成链)。拿不到 fiber 才退回 DOM 猜法。 */
+  function fiberLockBag(el) {
+    try {
+      const fk = Object.keys(el).find((k) => k.indexOf('__reactFiber$') === 0);
+      let f = fk ? el[fk] : null;
+      for (let i = 0; i < 5 && f; i++) {
+        for (const p of [f.memoizedProps, f.pendingProps]) {
+          if (!p) continue;
+          if (p.emoji && (p.emoji.id || p.emoji.guildId)) return p;
+          const c = p.children && p.children.props;
+          if (c && c.emoji && (c.emoji.id || c.emoji.guildId)) return c;
+        }
+        f = f.return;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function emojiLocked(host) {
+    if (!host) return false;
+    const bag = fiberLockBag(host);
+    if (bag && typeof bag.isLocked === 'boolean') return bag.isLocked;   // Discord 说了算
+    /* 【兜底 = 旧版那套 DOM 猜法】fiber 结构换了至少不至于整个「解锁」功能失效 */
+    if (host.getAttribute && host.getAttribute('aria-disabled') === 'true') return true;
+    if (host.querySelector && host.querySelector('[class*="emojiLockIcon"], [class*="lockIcon"], [class*="lockedIcon"]')) return true;
+    return false;
+  }
+
   function hijackEmojiClicks() {
     try {
       document.addEventListener('click', (e) => {
@@ -2121,14 +2010,9 @@
           const host = emojiHost(item);
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
-          /* 【判据】fiber 里的 isLocked 是 Discord 自己算完的结论 (外服/跳服使用/
-           *   动图要会员/角色限制全在里面) —— 它是唯一权威。
-           * 【上一版的错】拿网关集合当主判据, 但实页探针证明瘦身 READY 之后
-           *   一条 GUILD_CREATE 都没有 (g=0), 而那套 DOM 猜法把 isLocked=false 的
-           *   本服静态表情当成锁着 → 好好的表情被换成链。所以 fiber 拿不到时
-           *   才退回旧猜法 + 网关旁证。 */
-          /* 【一律接手，不看锁没锁】主人要的就是「提取链接、以链接形式发送」。
-           * data-id 存在 = 这是一颗自定义表情 (标准 unicode emoji 没有 id) → 接手。 */
+          /* 【只有上锁的才接手 —— 主人原话: 「表情栏给我改回去, 只有上锁的才用
+           * 链接发送」】能用的表情一律交回 Discord 原生, 我们不插手。 */
+          if (!emojiLocked(host)) { stamp('hijack', 'emoji:free'); return; }
           const animated = host.getAttribute('data-animated') === 'true';
           e.preventDefault();
           e.stopPropagation();
@@ -2212,14 +2096,45 @@
       host.appendChild(b);
     } catch (e) {}
   }
+  /** 字面 `:名字:` 的 span → 从同条消息的原始 content 里找回 <a?:名字:id> */
+  function rawEmojiToken(span, name) {
+    try {
+      const fk = Object.keys(span).find((k) => k.indexOf('__reactFiber$') === 0);
+      let f = fk ? span[fk] : null;
+      const re2 = new RegExp('<a?:' + name + ':([0-9]{15,25})>');
+      for (let i = 0; i < 20 && f; i++) {
+        for (const bag of [f.memoizedProps, f.pendingProps, f.stateNode && f.stateNode.props]) {
+          if (!bag || typeof bag !== 'object') continue;
+          for (const k of Object.keys(bag)) {
+            const v = bag[k];
+            if (typeof v === 'string') {
+              const m = re2.exec(v);
+              if (m) return { id: m[1], animated: v.indexOf('<a:' + name + ':') >= 0 };
+              continue;
+            }
+            /* 真 Discord 把它放在对象里: props.baseMessage.content
+             * (实页取证 f12.baseMessage.content = "<:pigpig:1507030922300620890>") */
+            if (!v || typeof v !== 'object') continue;
+            for (const kk of Object.keys(v)) {
+              const vv = v[kk];
+              if (typeof vv !== 'string' || vv.indexOf('<:') < 0) continue;
+              const m = re2.exec(vv);
+              if (m) return { id: m[1], animated: vv.indexOf('<a:' + name + ':') >= 0 };
+            }
+          }
+        }
+        f = f.return;
+      }
+    } catch (e) {}
+    return null;
+  }
+
   function addCopyButtons() {
     ensureCopyStyle();
     try {
-      /* ① 表情面板里的表情格 (不管能不能发, 想复制哪个都行) */
-      for (const b of document.querySelectorAll('button[data-type="emoji"][data-id]')) {
-        ensureCopyButton(b, emojiCdnUrl(b.dataset.id, b.getAttribute('data-animated') === 'true'));
-      }
-      /* ② 贴纸面板里的贴纸格 —— 主人点名的缺口 */
+      /* 【表情栏不放复制钮 —— 主人 2026-11-16: 「那个表情栏的链接复制是何意味? 给我去掉」】
+       * 表情栏只保留「上锁的格子点了插链接」这一件事; 要复制聊天里的表情看 ③④。 */
+      /* ② 贴纸面板里的贴纸格 —— 主人点名的缺口 (Discord 自己没这个入口) */
       for (const el of document.querySelectorAll('[data-type="sticker"][data-id]')) {
         const ent = stickerEntity(el);
         const url = stickerCdnUrl(el.dataset.id, el.dataset.formatType || (ent && ent.format_type));
@@ -2234,6 +2149,21 @@
         if (!host || !host.appendChild) continue;
         const animated = /\.gif([?#]|$)/i.test(String(im.src));
         ensureCopyButton(host, emojiCdnUrl(im.dataset.id, animated));
+      }
+      /* ④ 渲染成字面 `:名字:` 的外服表情 —— Discord 自己解析不了它, 正是「发不出去」
+       * 那一类。它不给 data-id, 但同条消息的原始 content 里有完整 token:
+       * 实页取证 fiber 上 `baseMessage.content` = "<:pigpig:1507030922300620890>"
+       * → 按名字找回 id 与是否动图; 找不回就什么都不做 (不猜)。 */
+      for (const box of document.querySelectorAll('[class*="messageContent_"]')) {
+        for (const sp of box.children) {
+          if (!sp || sp.tagName !== 'SPAN') continue;
+          if (sp.querySelector('img')) continue;
+          const m = /^:([a-zA-Z0-9_]{2,64}):$/.exec(String(sp.textContent || '').trim());
+          if (!m) continue;
+          if (sp.querySelector(':scope > .moe-copy')) continue;
+          const tok = rawEmojiToken(sp, m[1]);
+          if (tok) ensureCopyButton(sp, emojiCdnUrl(tok.id, tok.animated));
+        }
       }
       for (const im of document.querySelectorAll('img[src*="/stickers/"]')) {
         const host = im.closest('[class*="messageContent_"], [class*="imageWrapper"], [class*="attachment"], [class*="embed"]') || im.parentElement;
@@ -2288,7 +2218,6 @@
        * chip 转换很轻 (输入拢一共几张), 每轮都跑。 */
       emoTick = (emoTick + 1) % 2;
       if (emoTick === 0) addCopyButtons();              // 复制钮不必每轮重扫 DOM
-      convertBrokenEmojiChips();
     } catch (e) { stamp('err', 'loop:' + e.message); }
     setTimeout(loop, 1200);
   }

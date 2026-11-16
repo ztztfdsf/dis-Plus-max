@@ -2,7 +2,11 @@
 
 Discord 图片上传自动混淆扩展 —— **只有装了本插件的人才能看到原图**。轻量 · 无损 · **无需密钥** · 自研算法（MOE v3「流光照影」）。
 
-当前版本 **v3.6.8**（测试版）。许可证 GPL-3.0。
+当前版本 **v3.7.17**。许可证 GPL-3.0。
+
+> 本 README 写的是**现行行为**。表情那几版（3.7.12–3.7.16）试过用「可不可用」来分流，
+> 全部被实页推翻并在 3.7.17 删除 —— 过程与证据见下面
+> [😀 表情：一律接手，不判「能不能用」](#-表情一律接手不判能不能用) 一节。
 
 ---
 
@@ -59,9 +63,9 @@ API 滥用、自动化脚本、批量操作、self-bot 行为。Discord 官方�
 | 🧬 元数据保留 | 混淆图与解码图都完整携带 PNG 文本元数据（**ComfyUI 工作流**/提示词/参数），拖回 ComfyUI 可直接复现 |
 | 🚫 移除举报 | 自动清掉 Discord 界面所有「举报/Report」入口（hover 菜单/用户弹窗/工具条） |
 | 🏷 消息归属标签 | 徽标在**图片外**的头像槽里（头像下方）：自己发的图 → 「已混淆」；别人发的已解图 → 「已解析」+「下载」（带回复的消息也不会弄反）|
-| 😀 表情点击→链接 | 表情栏里点**任何**自定义表情（带 `data-id`）→ 输入框里直接插 `[. ](CDN 图链)`，面板像原生一样自动收起（Shift 连着挑不关）。**Discord 那条原生路整段不给跑** —— 所以不会弹「使用 Nitro 解锁所有表情符号 / 仅限 Nitro」会员弹窗（按 `isLocked` 分流时就会弹：实页证明要 Nitro 的外服表情在面板里根本不标锁）。标准 unicode 表情无 `data-id` → 不接手；被锁格子依旧去灰可点；表情栏里没有复制钮 |
-| 🔗 聊天里的外服表情 → 复制成链接 | **主人从始至终要的那件事**：消息里的表情上（左上角、悬停才浮现）给一个 🔗，点一下剪贴板就是 `[. ](图链)`。两种形态都覆盖：渲染成图的（Discord 给了 `data-id`）与渲染成字面 `:名字:` 的（它自己就解析不了 —— 正是发不出去那一类，id 从同条消息的原始 content 里按名字找回：fiber `baseMessage.content` = `<:名字:id>`）；找不回 id 就什么都不做，不猜 |
-| 🎴 贴纸去灰 + 复制钮 | 外服贴纸去黑白滤镜；**贴纸格、表情格、消息里的表情、消息里已发出的贴纸**上都补 🔗 钮（左上角、悬停才浮现，不挡表情也不挡贴纸），点一下把 `[. ](图链)` 复制进剪贴板 —— Discord 自己没这入口；贴纸本身的点击交回原生（不再抢插入） |
+| 😀 表情点击→链接 | 表情栏里点**任何**自定义表情（带 `data-id`）→ 输入框插 `[. ](CDN 图链)`，面板像原生一样自动收起（Shift 连着挑不关）。**Discord 原生那条路整段不给跑**（一走就弹 Nitro 会员框），所以不需要判「能不能用」。标准 unicode 表情没有 `data-id` → 不接手；被锁格子依旧去灰可点；**表情栏里没有复制钮** |
+| 🔗 聊天里的表情 / 贴纸 → 复制成链接 | 消息里的表情与贴纸上悬停出现 🔗（左上角、默认不浮现、不挡图），点一下剪贴板就是 `[. ](图链)`。两种形态都覆盖：渲染成图的（Discord 给了 `data-id`）与渲染成字面 `:名字:` 的（它自己就解析不了 —— 正是发不出去那一类，id 从同条消息的原始 content 里按名字找回）；找不回 id 就什么都不做，不猜 |
+| 🎴 贴纸去灰 + 复制钮 | 外服贴纸去黑白滤镜；**贴纸格、消息里的表情、消息里已发出的贴纸**上补 🔗 钮（Discord 自己没这入口；表情栏格子不放钮）；点贴纸本身交回 Discord 原生（不抢插入） |
 | 🌐 四个包 | Chrome / Edge (MV3) · Firefox (MV3 128+) · 油猴单文件 `moeguard.user.js`，`build.js` 一键全打 |
 
 ## 🧠 算法：MOE v3「流光照影」（自研、无密钥、无损）
@@ -214,7 +218,11 @@ node build.js              # 产出全部四个包到 dist/（3 个扩展 zip + 
 node build.js firefox      # 只构建一个扩展
 node build.js userscript   # 只构建油猴版
 node build-user.js         # 同上，单独跑油猴打包
-node dev/run.js            # 油猴版真 Chrome 验收（29 条用例）
+node dev/run.js            # 真 Chrome 无头仿真台（57 条用例，跑约 1~2 分钟）
+
+
+> ⚠️ 仿真台跑的是 `dist/moeguard.user.js`，**改完 `src/` 必须先 `node build-user.js`**，否则测的还是上一版包（这个坑实页踩过：改了代码、用例全绿、真页行为一点没变）。
+
 ```
 
 **构建是可复现的** —— zip 内时间戳固定，同一份源码永远产出相同字节。
@@ -251,7 +259,7 @@ node dev/run.js            # 油猴版真 Chrome 验收（29 条用例）
 
 - 你发的混淆图，对方**装了插件才能看到原图**；没装的只看到分形花纹
 - 两边的**盐值必须一致**（默认都留空 = 全员互通）。想做小圈子隔离就约定一个盐值一起填
-- 表情 / 贴纸解锁是**各自生效**的，与对方装不装无关（发出去的就是普通图片链接，任何人都能看到）
+- 表情与贴纸链接是**各自生效**的，与对方装不装无关（发出去的就是普通图片链接，任何人都能看到）
 
 顶层那段风险告知已经把 ToS 原文引用与实际执法情况都写清楚了，转发给别人时一并发过去。
 
@@ -376,9 +384,9 @@ crossRealm : true                      ← 确认跑在需要过桥的沙箱里
 `background.js` 本身没用到 `importScripts` / `clients` / `caches` 等 Service Worker 专属 API，
 所以换成 event page 声明后代码零改动即可运行。
 
-### 🦊 Firefox 上图片链接发不出去的真因（表情 / 贴纸解锁）
+### 🦊 Firefox 上图片链接发不出去的真因（表情插入通道）
 
-表情与贴纸解锁靠往输入框插一段 CDN 图链接。旧版靠伪造 `paste`：
+表情接手靠往输入框插一段 CDN 图链接。旧版靠伪造 `paste`：
 
 ```js
 const dt = new DataTransfer();
@@ -490,32 +498,45 @@ tag.style.top = top;  dl.style.top = top + 20;
 为防同类回归，加了 `tests/lint-scope.mjs`（eslint `no-undef`）。
 这种错文本搜索发现不了 —— 同名变量在别的函数里仍有声明。
 
-### 🔓 「解锁了的表情」插不出链接：自己把锁信号擦了
+### 😀 表情：一律接手，不判「能不能用」
 
-实页诊断（点本服动图表情，需 Nitro，必然是锁的）：
+现行规则（v3.7.17）：表情栏里点**任何**带 `data-id` 的格子 →
+① `preventDefault()` + `stopPropagation()`（document 捕获阶段，Discord 原生处理整段不跑）
+② 输入框插 `[. ](CDN 图链)`（动图 `.gif`／静态 `.webp`，看 `data-animated`）
+③ 自动收起面板（Shift 连着挑 = 留着连续挑，和原生一样）
+标准 unicode 表情没有 `data-id` → 不接手（本来就能直接发）。
 
-```
-ariaDisabled : null     ← 锁信号不在了
-hasLockIcon  : false
-insertStamp  : null     ← 我们的插入通道根本没跑
-输入框只多了 12 个字符   ← CDN 链接 60+ 字符, 那是 Discord 自己插的 :name:
-```
+**为什么不判可用性 —— 下面每条路都是实页打一枪打死的，不是推演：**
 
-`emojiLocked()` 最主要的锁信号就是 `aria-disabled`，而 `unlockEmoji()`
-每 1.2s + 每次 DOM 变动都会 `removeAttribute('aria-disabled')`（为了去灰、恢复可点）。
-面板一渲染标记就被自己擦掉，等点下去时三条检查全落空 → 我们不接管 →
-Discord 原生插入 `:name:` 文本形式 → 外部/动图表情服务端不解析 → 对方只看到字面文本。
+| 试过的判据 | 实页一手证据 | 结论 |
+|---|---|---|
+| 按 Discord 的 `isLocked` 分流（3.7.12–3.7.16） | 点一颗外服表情 → `data-hijack=emoji:free`（Discord 标它 `isLocked=false`）→ 放行走原生 → **当场弹「使用 Nitro 解锁所有表情符号 / 仅限 Nitro」会员弹窗** | **要 Nitro 的外服表情在面板里根本不标锁** —— 按锁分流必然漏，而且漏的后果是弹框卖会员 |
+| 网关 `GUILD_CREATE` 的 `emojis[]` 集合 | 包装在位、dispatch 确实流过（7 秒窗口抓到 9 条），但一条 `GUILD_CREATE` 都没发（`g=0 e=0 s=0`）—— 现在 Discord 用瘦身 READY + 按需 REST 拉表情表 | 拿空集合判「不在集合里 = 外服」会把**所有**表情误判 |
+| 表情栏搜索框当神谕 | A/B 确实准（本服那颗 1 格、报没会员那颗 0 格），但每判一颗都要**打开面板打字** | 判得出，但有可见副作用 → 否 |
+| 把 `<:名字:id>` 当文本插进输入框，看会不会解析回 chip | 正样本（能用的）与负样本（报没会员的）**都留在字面文本** | 判不出 |
+| 输入框里的 chip 就地转链（3.7.14） | —— | 连本来能原生发的表情都被降级 → 否 |
 
-**这跟 Firefox 无关**（上一节的 realm 修复是对的，只是这条路根本没走到）。
+**一律接手反而不需要判得对**：原生那条路整段拦死之后，「弹会员框」与「发出去变字面文本」
+都从结构上不可能出现。
 
-修法是把顺序倒过来：**固化在前、擦除在后**。先把锁信号连同表情 id 写进
-`data-moe-lock`，再摘 `aria-disabled`；判定时优先读这个标记。
-存 id 而不是布尔，是因为表情面板是虚拟滚动，React 会把同一个 `button` 节点
-复用给别的表情 —— 只存 `'1'` 的话滚一下就会把没锁的表情也当成锁的，
-本可原生发的反而被换成链接（反向 bug）。
+仿真台里给格子挂一个**假的原生 click 监听**（模拟 Discord 弹会员框那个 handler），
+断言点下去之后它的**调用次数 = 0** —— 这条比「判得准不准」重要。
 
-诊断面板同时加了 `data-hijack`（`take` / `free` / `no-id` / `lottie`），
-下次一眼就能看出到底有没有接管，不用再从 `insertStamp` 是空倒推。
+诊断面板 `data-hijack` 现值：`emoji:take` / `emoji:take:gif`（接手了）、`emoji:no-id`
+（拿不到 id，宁可不插）、`throw:…`（接手监听器里抛出的异常 —— **不再静默吞掉**）。
+
+**另一条同类教训（3.7.16）：绝不要拿 Discord 的类名当选择器条件。**
+复制钮的浮现规则原本只写 `button[data-type="emoji"]:hover` 与 `[data-type="sticker"]:hover`，
+而消息里表情的宿主是 `span.emojiContainer_*`、消息里贴纸的宿主是 `messageContent_*` →
+钮**挂上了却永远不浮现**（实页读数 `imgs=9 pills=9` 但 `pillOpacity=0`、`pillPE=none`），
+看起来就是「根本没做」。现在由 `ensureCopyButton` 自己给宿主打 `moe-copy-host` 标记，
+CSS 只认这个标记；用例断言「每个钮的宿主都带标记」，不再只断言「钮存在」。
+
+> 历史（已被上面取代，留在这里是因为这两个坑真的花过时间）：3.7.11 之前靠猜 DOM 的
+> `aria-disabled`/锁图标判锁，而 `unlockEmoji()` 每 1.2 秒就把 `aria-disabled` 摘掉（为了去灰可点）
+> → **自己把锁信号擦了**，点下去三条检查全落空。为此引入过 `data-moe-lock` 固化标记，
+> 又踩过「表情面板虚拟滚动会复用同一个 `button` 节点，只存布尔会把没锁的当成锁的」这个反向 bug。
+> 这套机制在 3.7.17 随分流一起删干净了，现在只保留摘 `aria-disabled` 用于去灰可点。
 
 ## 🔬 技术实现（踩坑记录）
 
@@ -546,7 +567,10 @@ node tests/lint-scope.mjs      # 作用域检查 (拓 try/catch 里被吞掉的 
 node tests/make-icons.js       # 生成扩展图标
 node tests/make-test-image.js  # 生成测试图
 node tests/verify-cdn.js <channelId>   # 拉真实 Discord CDN 验证像素一致性
-node build.js                  # 打三个浏览器的包
+node build.js                  # 打四个包 (chrome / edge / firefox 三个 zip + moeguard.user.js)
+node build.js firefox          # 只打某一个扩展
+node build-user.js             # 只打油猴单文件
+node dev/run.js                # 真 Chrome 无头仿真台（57 条用例，跑约 1~2 分钟）
 ```
 
 > `lint-scope.mjs` 存在的理由：v3.6.5 的角标重叠 bug 是重构删了变量声明、
@@ -558,6 +582,7 @@ node build.js                  # 打三个浏览器的包
 | 项目 | 结果 |
 |---|---|
 | 单测 (64 项) | ✅ 全通过，1MP 变换 16ms / 8ms；含元数据往返、流程顺序与跳 realm 硬验证 |
+| 仿真台 (57 项) | ✅ 真 Chrome 跑 Discord 仿真页：上传拦截→换体、自动解码与重扫收敛、面板与开关不串台、右键菜单、**表情接手（含「假原生监听调用次数=0」）**、复制钮与宿主标记 |
 | 上传链路提速 | ✅ 1201ms → 157ms（7.7x），体积 2.49MB → 0.85MB（浏览器实测） |
 | 定位框识别 | ✅ 混淆图命中、普通图不误报、缩到 50% 仍能识别 |
 | 审查判定 | ✅ 裸露高分 / 风景·UI·花衣服低分 / 远端失败回落本地 / 异常保守混淆 |
@@ -570,19 +595,30 @@ node build.js                  # 打三个浏览器的包
 ## 🗂 文件结构
 
 ```
-moe-image-guard/
-├── manifest.json          MV3 清单 (Chrome 基准, build.js 按目标改写)
-├── build.js               打包脚本: 一份源码 → chrome / edge / firefox 三个包
-├── CHANGELOG.md           更新日志 (按浏览器分段)
+dis-Plus-max/
+├── manifest.json          MV3 清单 (Chrome 基准, build.js 按目标改写; 版本号的唯一权威)
+├── build.js               打包: 一份源码 → chrome / edge / firefox 三个 zip + 调 build-user.js
+├── build-user.js          油猴单文件打包 (拼装 + 对 hook/content 的补丁, 每个锚点都有断言)
+├── CHANGELOG.md           更新日志 (按版本分段, 含被打死的路)
+├── README.md              本文 (总览: 算法/审查/安装/踩坑记录)
+├── README-userscript.md   油猴版安装、与扩展版的差异、补丁说明
 ├── src/
 │   ├── core.js            v3 混淆引擎 + 快速 PNG 编码器 + moEg/moMt 块 + 感知指纹 (纯逻辑)
 │   ├── review.js          审查层: 启发式打分 + resolveAction 统一判定 (纯逻辑)
 │   ├── format.js          Blob↔ImageData↔PNG 工具 + 跳 realm 桥
 │   ├── hook.js            主世界: XHR/fetch 上传拦截 (先审查后编码)
-│   ├── content.js         隔离世界: 预览审查定结论/预筛/自动解码/角标/右键弹窗/表情贴纸解锁
+│   ├── content.js         隔离世界: 预览审查定结论/预筛/自动解码/角标/右键菜单/表情接手与复制钮
 │   ├── background.js      后台: 右键菜单/跨域抓图/下载/遥测/NSFW API 代发
 │   ├── options.html/js    设置页 (算法自测 + 本地审查自测)
-│   └── popup.html/js      弹窗 (开关 + 调试面板)
+│   ├── popup.html/js      弹窗 (开关 + 调试面板)
+│   └── userscript/
+│       ├── shim.js        chrome.* → GM_* 本地实现 (存储按 key 写、下载走 GM_download)
+│       ├── panel.js       把 popup/options 搬进页内浮层 (#moe-panel, Alt+M)
+│       └── ctxmenu.js     页内右键菜单 (只接附件图; Shift+右键交回原生)
+├── dev/
+│   ├── harness.html       Discord 仿真页 (真 Slate / 表情面板 / 贴纸格 / 消息流, 不是 mock)
+│   ├── run.js             拉起 headless Chrome 跑仿真台
+│   └── tmp/               本地一次性脚本 (gitignore)
 ├── tests/
 │   ├── core.test.js       64 项单测 (带反面断言: 先证明旧代码真的会坏)
 │   ├── lint-scope.mjs     作用域检查 (抓 try/catch 里被吞掉的 ReferenceError)
@@ -601,6 +637,8 @@ moe-image-guard/
 - 单张不想混淆 → 预览图**右上角 ✕**（变成 ○ 就是原图发送，再点可恢复）
 - 改了盐值/块大小后，弹窗点开关或刷新页面即生效
 - 动画 GIF/WebP 默认原样发送（动画无法无损混淆）
+- 表情栏里点表情一律插 `[. ](图链)` 并自动收起面板（想连续挑就 **Shift+点**，面板不关）
+- 聊天里别人发的外服表情：鼠标悬上去 → 左上角出现 🔗 → 点一下剪贴板就是发送格式
 - 弹窗底部有两个调试面板：
   - 绿色 = 后台遥测（跟踪文件 / 已编码 / 上传拦获 / 已替换 / 审查结果 / 最近异常）
   - 粉色 = 页面脚本诊断（版本 / 扫描到几张图 / 各图状态 / 配置 / 最近解码结果）

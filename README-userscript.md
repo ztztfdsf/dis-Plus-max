@@ -3,8 +3,9 @@
 把 [`ztztfdsf/dis-Plus-max`](https://github.com/ztztfdsf/dis-Plus-max) 这个 **Discord 浏览器扩展** 原样移植成**单文件油猴脚本**。
 算法（MOE v3 流光照影）、审查层、解码管线、UI 全部沿用上游源码，**内核零改写**。
 
-- 产物：`dist/moeguard.user.js`（约 259 KB，单文件，无外部依赖）
-- 上游基线：v3.7.11
+- 产物：`dist/moeguard.user.js`（约 279 KB，单文件，无外部依赖）
+- 版本：与扩展版**同一份源码、同一个版本号**（现在 v3.7.17）—— `manifest.json` 是唯一权威，
+  `build-user.js` 把版本号写进脚本头与诊断面板，不存在“油猴版落后”这种事
 
 ---
 
@@ -38,7 +39,7 @@
 | 自动解码消息里的喵图 | ✅ | ✅ 一致 |
 | 预览角标 / ✕○ 单图推翻 | ✅ | ✅ 一致 |
 | 本地启发式审查 / 远端 API 审查 | ✅ | ✅ 一致（远端改走 `GM_xmlhttpRequest`） |
-| 表情 / 贴纸解锁、移除举报入口 | ✅ | ✅ 一致 |
+| 表情点击→链接（一律接手）、消息表情/贴纸复制钮、移除举报入口 | ✅ | ✅ 一致 |
 | 群组盐值、块大小、ComfyUI 元数据保留 | ✅ | ✅ 一致 |
 | 设置页 / 弹窗 | 扩展弹窗 + 独立设置页 | **页内浮层**（`Alt+M`），原 HTML/JS 原样搬进去 |
 | 右键「解码此图片」 | 原生 contextMenus | **页内菜单**：附件图上右键；`Shift+右键` = Discord 原生菜单 |
@@ -53,7 +54,7 @@
 
 ```bash
 node build-user.js        # → dist/moeguard.user.js
-node dev/run.js           # → 真 Chrome 跑 29 条验收用例
+node dev/run.js           # → 真 Chrome 跑 57 条验收用例（改完 src/ 要先跑上面那行）
 node tests/core.test.js   # → 上游 64 条算法单测（源码没动，必然全绿）
 ```
 

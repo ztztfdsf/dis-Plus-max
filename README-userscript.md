@@ -1,4 +1,4 @@
-# 🌸 MoeGuard 油猴版（dis-Plus-max 移植）
+﻿# 🌸 MoeGuard 油猴版（dis-Plus-max 移植）
 
 把 [`ztztfdsf/dis-Plus-max`](https://github.com/ztztfdsf/dis-Plus-max) 这个 **Discord 浏览器扩展** 原样移植成**单文件油猴脚本**。
 算法（MOE v3 流光照影）、审查层、解码管线、UI 全部沿用上游源码，**内核零改写**。
@@ -54,7 +54,7 @@
 
 ```bash
 node build-user.js        # → dist/moeguard.user.js
-node dev/run.js           # → 真 Chrome 跑 57 条验收用例（改完 src/ 要先跑上面那行）
+node dev/run.js           # → 真 Chrome 跑 62 条验收用例（改完 src/ 要先跑上面那行）
 node tests/core.test.js   # → 上游 64 条算法单测（源码没动，必然全绿）
 ```
 

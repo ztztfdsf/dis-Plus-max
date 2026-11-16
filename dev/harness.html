@@ -615,22 +615,57 @@
     ok('复制完钮变 ✓', pillLit.getAttribute('data-moe-copy') === 'done', pillLit.textContent);
   }
 
-  /* 贴纸: 只给复制钮, 不抢点击 (主人拍板保留) */
-  const sArea = document.createElement('div');
-  sArea.innerHTML =
-    '<div class="row_harness">' +
+  /* ---------- 贴纸: 与表情完全同一套路 ----------
+   * 主人 2026-11-16:「像表情一样, 去除那个复制链接的按钮, 点击就直接发送到输入框里」
+   * 贴纸格必须造在面板 (trap) 里 —— 真页上表情格与贴纸格共用同一个 clickTrap。
+   * 另造一个「聊天里已发出的贴纸」: 它同样带 data-type=sticker + data-id,
+   * 但点它是看大图 → 绝不能接手, 只保留复制钮。 */
+  const stGrid = document.createElement('div');
+  stGrid.className = 'stickerPicker_ddd';
+  stGrid.innerHTML =
     '<div id="sA" data-type="sticker" data-id="1700000000000000011" data-format-type="1"><div class="stickerNode_x"></div></div>' +
-    '</div>';
-  document.body.appendChild(sArea);
+    '<div id="sB" data-type="sticker" data-id="1700000000000000022" data-format-type="2"><div class="stickerNode_y"></div></div>';
+  trap.appendChild(stGrid);
+  window.__stNative = 0;                       // 假的 Discord 原生处理 (外服贴纸走原生 = 弹会员框那个)
+  stGrid.querySelectorAll('[data-type="sticker"]').forEach((x) => {
+    x.addEventListener('click', () => { window.__stNative++; });
+  });
+  const chatSt = document.createElement('div');
+  chatSt.className = 'messageContent_eee';
+  chatSt.innerHTML = '<img data-type="sticker" data-id="1700000000000000033" src="https://media.discordapp.net/stickers/1700000000000000033.png?size=160">';
+  document.body.appendChild(chatSt);
   await sleep(3200);
-  const pillA = document.getElementById('sA').querySelector('.moe-copy');
-  ok('贴纸格仍有 🔗 (Discord 自己没这个入口)', !!pillA,
-    'url=' + (pillA ? pillA.getAttribute('data-moe-url') : 'none'));
+  const stA = document.getElementById('sA');
+  ok('【贴纸格无复制钮】格子上的 🔗 已按主人要求去掉',
+    !stA.querySelector('.moe-copy') && !document.getElementById('sB').querySelector('.moe-copy'),
+    'sA 钮=' + stA.querySelectorAll('.moe-copy').length);
   const b16 = cbox13.textContent;
-  document.getElementById('sA').click();
+  trap.style.display = '';
+  cbox13.focus();
+  stA.click();
   await sleep(600);
-  ok('点贴纸本身不往输入框插东西', cbox13.textContent === b16,
-    JSON.stringify(cbox13.textContent.slice(b16.length, b16.length + 60)));
+  ok('点贴纸格 → 输入框里直接是 [. ](贴纸图链)',
+    cbox13.textContent.slice(b16.length).indexOf('[. ](https://media.discordapp.net/stickers/1700000000000000011.png?size=160)') >= 0,
+    JSON.stringify(cbox13.textContent.slice(b16.length, b16.length + 90)));
+  ok('【会员弹窗从结构上不可能】贴纸格的原生 click 监听一次都没被调用',
+    window.__stNative === 0, '假原生调用次数=' + window.__stNative);
+  ok('点完贴纸面板自动收起 (与表情同一个动作)', trap.style.display === 'none', 'display=' + trap.style.display);
+  const b16b = cbox13.textContent;
+  trap.style.display = '';
+  cbox13.focus();
+  document.getElementById('sB').click();
+  await sleep(600);
+  ok('APNG 贴纸 (format_type=2) 同样接手 → .png 链, 原生仍 0 次',
+    cbox13.textContent.slice(b16b.length).indexOf('[. ](https://media.discordapp.net/stickers/1700000000000000022.png?size=160)') >= 0 &&
+    window.__stNative === 0, JSON.stringify(cbox13.textContent.slice(b16b.length, b16b.length + 80)));
+  const chatPill = chatSt.querySelector(':scope > .moe-copy');
+  ok('聊天里已发出的贴纸仍有 🔗 (「复制别人的贴纸」那条路保留)', !!chatPill,
+    'url=' + (chatPill ? chatPill.getAttribute('data-moe-url') : 'none'));
+  const b16c = cbox13.textContent;
+  chatSt.querySelector('img').click();
+  await sleep(500);
+  ok('点聊天里的贴纸不接手 (那是看大图, 交回原生)', cbox13.textContent === b16c,
+    JSON.stringify(cbox13.textContent.slice(b16c.length, b16c.length + 60)));
 
   /* 表情栏里的复制钮按主人要求去掉 */
   ok('【表情栏无复制钮】表情格上不再有 🔗 (主人: 那个「表情栏的链接复制」去掉)',

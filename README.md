@@ -1,4 +1,4 @@
-# 🌸 dis-Plus max（MoeGuard 喵图混淆）
+﻿# 🌸 dis-Plus max（MoeGuard 喵图混淆）
 
 Discord 图片上传自动混淆扩展 —— **只有装了本插件的人才能看到原图**。轻量 · 无损 · **无需密钥** · 自研算法（MOE v3「流光照影」）。
 
@@ -63,9 +63,9 @@ API 滥用、自动化脚本、批量操作、self-bot 行为。Discord 官方�
 | 🧬 元数据保留 | 混淆图与解码图都完整携带 PNG 文本元数据（**ComfyUI 工作流**/提示词/参数），拖回 ComfyUI 可直接复现 |
 | 🚫 移除举报 | 自动清掉 Discord 界面所有「举报/Report」入口（hover 菜单/用户弹窗/工具条） |
 | 🏷 消息归属标签 | 徽标在**图片外**的头像槽里（头像下方）：自己发的图 → 「已混淆」；别人发的已解图 → 「已解析」+「下载」（带回复的消息也不会弄反）|
-| 😀 表情点击→链接 | 表情栏里点**任何**自定义表情（带 `data-id`）→ 输入框插 `[. ](CDN 图链)`，面板像原生一样自动收起（Shift 连着挑不关）。**Discord 原生那条路整段不给跑**（一走就弹 Nitro 会员框），所以不需要判「能不能用」。标准 unicode 表情没有 `data-id` → 不接手；被锁格子依旧去灰可点；**表情栏里没有复制钮** |
+| 😀 表情 / 贴纸点击→链接 | 表情栏里点**任何**自定义表情或贴纸（带 `data-id`）→ 输入框插 `[. ](CDN 图链)`，面板像原生一样自动收起（Shift 连着挑不关）。**Discord 原生那条路整段不给跑**（一走就弹 Nitro 会员框），所以不需要判「能不能用」。标准 unicode 表情没有 `data-id` → 不接手；被锁格子依旧去灰可点；**表情栏里没有复制钮** |
 | 🔗 聊天里的表情 / 贴纸 → 复制成链接 | 消息里的表情与贴纸上悬停出现 🔗（左上角、默认不浮现、不挡图），点一下剪贴板就是 `[. ](图链)`。两种形态都覆盖：渲染成图的（Discord 给了 `data-id`）与渲染成字面 `:名字:` 的（它自己就解析不了 —— 正是发不出去那一类，id 从同条消息的原始 content 里按名字找回）；找不回 id 就什么都不做，不猜 |
-| 🎴 贴纸去灰 + 复制钮 | 外服贴纸去黑白滤镜；**贴纸格、消息里的表情、消息里已发出的贴纸**上补 🔗 钮（Discord 自己没这入口；表情栏格子不放钮）；点贴纸本身交回 Discord 原生（不抢插入） |
+| 🎴 贴纸去灰 | 外服贴纸去黑白滤镜（`stickerUnsendable` 那个 grayscale 才是源头）。**贴纸格与表情格同一条路**：点一下 = 原生整段拦死 + 插 `[. ](贴纸图链)` + 收面板；格子上不放复制钮。**聊天里已发出的贴纸仍有 🔗**（那是「复制别人的贴纸」），但点它本身不接手 —— 点聊天里的贴纸是看大图 |
 | 🌐 四个包 | Chrome / Edge (MV3) · Firefox (MV3 128+) · 油猴单文件 `moeguard.user.js`，`build.js` 一键全打 |
 
 ## 🧠 算法：MOE v3「流光照影」（自研、无密钥、无损）
@@ -218,7 +218,7 @@ node build.js              # 产出全部四个包到 dist/（3 个扩展 zip + 
 node build.js firefox      # 只构建一个扩展
 node build.js userscript   # 只构建油猴版
 node build-user.js         # 同上，单独跑油猴打包
-node dev/run.js            # 真 Chrome 无头仿真台（57 条用例，跑约 1~2 分钟）
+node dev/run.js            # 真 Chrome 无头仿真台（62 条用例，跑约 1~2 分钟）
 
 
 > ⚠️ 仿真台跑的是 `dist/moeguard.user.js`，**改完 `src/` 必须先 `node build-user.js`**，否则测的还是上一版包（这个坑实页踩过：改了代码、用例全绿、真页行为一点没变）。
@@ -502,9 +502,15 @@ tag.style.top = top;  dl.style.top = top + 20;
 
 现行规则（v3.7.17）：表情栏里点**任何**带 `data-id` 的格子 →
 ① `preventDefault()` + `stopPropagation()`（document 捕获阶段，Discord 原生处理整段不跑）
-② 输入框插 `[. ](CDN 图链)`（动图 `.gif`／静态 `.webp`，看 `data-animated`）
+② 输入框插 `[. ](CDN 图链)`（表情看 `data-animated` → `.gif`／`.webp`；
+　　贴纸看 `data-format-type`：1=PNG、2=APNG、4=GIF 都出 `.png`/`.gif` 链，**3=Lottie 不接手**（发链对方只会拿到 JSON））
 ③ 自动收起面板（Shift 连着挑 = 留着连续挑，和原生一样）
 标准 unicode 表情没有 `data-id` → 不接手（本来就能直接发）。
+
+**贴纸与表情是同一条路**（主人 2026-11-16：「像表情一样，去除那个复制链接的按钮，点击就直接发送到输入框里」）。
+但贴纸多一道**面板判定** `inExpressionPanel()`：聊天里已发出的贴纸同样带 `data-type="sticker"` + `data-id`，
+而点它是为了看大图 —— 不判这一刀就会把「点开大图」变成「往输入框插链接」。判定用面板的 clickTrap 宿主
+（`#emoji-picker-grid` / `[class*="trapClicks"]` / `[class*="clickTrapContainer"]`），真页实测表情格与贴纸格共用同一个 trap。
 
 **为什么不判可用性 —— 下面每条路都是实页打一枪打死的，不是推演：**
 
@@ -570,7 +576,7 @@ node tests/verify-cdn.js <channelId>   # 拉真实 Discord CDN 验证像素一�
 node build.js                  # 打四个包 (chrome / edge / firefox 三个 zip + moeguard.user.js)
 node build.js firefox          # 只打某一个扩展
 node build-user.js             # 只打油猴单文件
-node dev/run.js                # 真 Chrome 无头仿真台（57 条用例，跑约 1~2 分钟）
+node dev/run.js                # 真 Chrome 无头仿真台（62 条用例，跑约 1~2 分钟）
 ```
 
 > `lint-scope.mjs` 存在的理由：v3.6.5 的角标重叠 bug 是重构删了变量声明、
@@ -582,7 +588,7 @@ node dev/run.js                # 真 Chrome 无头仿真台（57 条用例，跑
 | 项目 | 结果 |
 |---|---|
 | 单测 (64 项) | ✅ 全通过，1MP 变换 16ms / 8ms；含元数据往返、流程顺序与跳 realm 硬验证 |
-| 仿真台 (57 项) | ✅ 真 Chrome 跑 Discord 仿真页：上传拦截→换体、自动解码与重扫收敛、面板与开关不串台、右键菜单、**表情接手（含「假原生监听调用次数=0」）**、复制钮与宿主标记 |
+| 仿真台 (62 项) | ✅ 真 Chrome 跑 Discord 仿真页：上传拦截→换体、自动解码与重扫收敛、面板与开关不串台、右键菜单、**表情接手（含「假原生监听调用次数=0」）**、复制钮与宿主标记 |
 | 上传链路提速 | ✅ 1201ms → 157ms（7.7x），体积 2.49MB → 0.85MB（浏览器实测） |
 | 定位框识别 | ✅ 混淆图命中、普通图不误报、缩到 50% 仍能识别 |
 | 审查判定 | ✅ 裸露高分 / 风景·UI·花衣服低分 / 远端失败回落本地 / 异常保守混淆 |

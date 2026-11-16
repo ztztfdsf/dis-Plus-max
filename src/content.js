@@ -1963,15 +1963,43 @@
     if (item.matches && item.matches('button[data-type="emoji"]')) return item;
     return (item.querySelector && item.querySelector('button[data-type="emoji"]')) || item;
   }
+  /** 这个格子在表情/贴纸面板里吗?
+   * 【为什么必须分这一刀】聊天里已发出的贴纸同样带 data-type="sticker"+data-id,
+   * 而点它是为了看大图 —— 接手就会把大图点击变成往输入框插链接。
+   * 面板的宿主是 Discord 的 clickTrap 容器 (真页实测: 表情格与贴纸格共用同一个 trap)。 */
+  function inExpressionPanel(el) {
+    try {
+      return !!(el.closest && (el.closest('#emoji-picker-grid') ||
+        el.closest('[class*="trapClicks"]') || el.closest('[class*="clickTrapContainer"]') ||
+        el.closest('[class*="expression"]')));
+    } catch (e) { return false; }
+  }
   function hijackEmojiClicks() {
     try {
       document.addEventListener('click', (e) => {
         try {
           const t = e.target;
           if (!t || !t.closest) return;
+          if (t.closest('.moe-copy')) return;              // 复制钮自己的事, 不在这拦
+          /* 【贴纸格 · 与表情完全同一套路】主人 2026-11-16:
+           *   「像表情一样, 去除那个复制链接的按钮, 点击就直接发送到输入框里」
+           * → 点格子 = preventDefault+stopPropagation (原生整段不跑, 不会弹会员框)
+           *   + 插 [. ](贴纸图链) + 自动收面板 (Shift = 留着连续挑)。 */
+          const st = t.closest('[data-type="sticker"], [class*="sticker_"][data-id]');
+          if (st && st.dataset && st.dataset.id && inExpressionPanel(st)) {
+            const sent = stickerEntity(st);
+            const fmt = st.dataset.formatType || (sent && sent.format_type) || 1;
+            const surl = stickerCdnUrl(st.dataset.id, fmt);
+            if (!surl) { stamp('hijack', 'sticker:lottie'); return; }   // Lottie 链化没意义 → 交回 Discord
+            e.preventDefault();
+            e.stopPropagation();
+            stamp('hijack', 'sticker:take:' + fmt);
+            insertIntoComposer(linkText(surl) + ' ').catch(() => {});
+            if (!e.shiftKey) closeExpressionPicker();
+            return;
+          }
           const item = t.closest('button[data-type="emoji"], [class*="emojiItem"], li[role="gridcell"]');
           if (!item) return;
-          if (t.closest('.moe-copy')) return;              // 复制钮自己的事, 不在这拦
           const host = emojiHost(item);
           const id = host.dataset ? host.dataset.id : '';
           if (!id) { stamp('hijack', 'emoji:no-id'); return; }                 // 拿不到 id 就不插, 宁可不做
@@ -2005,9 +2033,12 @@
    * 格式编号 (Discord 的 format_type, DOM 上是 data-format-type):
    *   1=PNG  2=APNG  3=Lottie(JSON 动画)  4=GIF
    *   Lottie 发链接没意义 (对方看到的是 JSON), 实测拿 .json 也直接 400 → 不拦。
-   * 只拦【外服务器】的贴纸; 本服可用的让 Discord 原生发。
-   * 判定靠 React fiber 里的 guild_id —— 实测贴纸面板 DOM 上没有任何锁标记
-   *   (aria-disabled 为 null, opacity 也是 1), 只有 fiber 能区分。
+   * 现行规则 (v3.7.17 起): 与表情同一套路 —— 面板里的贴纸格【一律接手】。
+   * 【为什么不能只拦「外服」】上一版靠 fiber 里的 guild_id 判归属, 结果要会员的
+   *   贴纸被放行走原生 → 弹「仅限 Nitro」会员框 (与表情同一事故, 见
+   *   「😀 表情: 一律接手」一节)。原生路整段拦死才不需要判得对。
+   * 【只接面板里的格子】聊天里已发出的贴纸也带 data-type="sticker", 但点它是看大图
+   *   → 必须交回原生, 所以用 inExpressionPanel() 先确认在面板里。
    * -------------------------------------------------- */
   const STICKER_EXT = { 1: 'png', 2: 'png', 4: 'gif' };   // 3=Lottie 故意不列
   function stickerCdnUrl(id, fmt) {
@@ -2109,16 +2140,10 @@
   function addCopyButtons() {
     ensureCopyStyle();
     try {
-      /* 【表情栏不放复制钮 —— 主人 2026-11-16: 「那个表情栏的链接复制是何意味? 给我去掉」】
-       * 表情栏只保留「上锁的格子点了插链接」这一件事; 要复制聊天里的表情看 ③④。 */
-      /* ② 贴纸面板里的贴纸格 —— 主人点名的缺口 (Discord 自己没这个入口) */
-      for (const el of document.querySelectorAll('[data-type="sticker"][data-id]')) {
-        const ent = stickerEntity(el);
-        const url = stickerCdnUrl(el.dataset.id, el.dataset.formatType || (ent && ent.format_type));
-        if (!url) continue;                                  // Lottie 发链没意义
-        const node = el.querySelector('[class*="stickerNode"]');
-        ensureCopyButton((node && node.parentElement) || el, url);
-      }
+      /* 【表情栏与贴纸栏都不放复制钮 —— 主人两轮分别点名: 「那个表情栏的链接复制是何意味?
+       * 给我去掉」+「像表情一样, 去除那个复制链接的按钮, 点击就直接发送到输入框里」】
+       * 面板格子的职责只剩一件事: 点了就把 [. ](图链) 插进输入框并收面板。
+       * 聊天里已发出的表情/贴纸仍然有钮 (③④⑤) —— 那才是「复制别人的外服表情/贴纸」。 */
       /* ③ 消息里已经发出来的表情与贴纸 —— 别人发的外服表情也能一键拿链
        * (主人: 「在聊天中直接复制外服表情」就该直接是链接格式) */
       for (const im of document.querySelectorAll('[class*="messageContent_"] img[data-type="emoji"][data-id]')) {
@@ -2142,6 +2167,7 @@
           if (tok) ensureCopyButton(sp, emojiCdnUrl(tok.id, tok.animated));
         }
       }
+      /* ⑤ 消息里已经发出来的贴纸 —— 这是「复制别人的贴纸」那条路, 保留 */
       for (const im of document.querySelectorAll('img[src*="/stickers/"]')) {
         const host = im.closest('[class*="messageContent_"], [class*="imageWrapper"], [class*="attachment"], [class*="embed"]') || im.parentElement;
         if (!host || !host.appendChild) continue;

@@ -2,7 +2,7 @@
 
 Discord 图片上传自动混淆扩展 —— **只有装了本插件的人才能看到原图**。轻量 · 无损 · **无需密钥** · 自研算法（MOE v3「流光照影」）。
 
-当前版本 **v3.7.17**。许可证 GPL-3.0。
+当前版本 **v3.8.0**。许可证 GPL-3.0。
 
 > 本 README 写的是**现行行为**。表情那几版（3.7.12–3.7.16）试过用「可不可用」来分流，
 > 全部被实页推翻并在 3.7.17 删除 —— 过程与证据见下面
@@ -218,7 +218,7 @@ node build.js              # 产出全部四个包到 dist/（3 个扩展 zip + 
 node build.js firefox      # 只构建一个扩展
 node build.js userscript   # 只构建油猴版
 node build-user.js         # 同上，单独跑油猴打包
-node dev/run.js            # 真 Chrome 无头仿真台（63 条用例，跑约 1~2 分钟）
+node dev/run.js            # 真 Chrome 无头仿真台（61 条用例，跑约 1~2 分钟）
 
 
 > ⚠️ 仿真台跑的是 `dist/moeguard.user.js`，**改完 `src/` 必须先 `node build-user.js`**，否则测的还是上一版包（这个坑实页踩过：改了代码、用例全绿、真页行为一点没变）。
@@ -500,7 +500,7 @@ tag.style.top = top;  dl.style.top = top + 20;
 
 ### 😀 表情：一律接手，不判「能不能用」
 
-现行规则（v3.7.17）：表情栏里点**任何**带 `data-id` 的格子 →
+现行规则（v3.8.0）：表情栏里点**任何**带 `data-id` 的格子 →
 ① `preventDefault()` + `stopPropagation()`（document 捕获阶段，Discord 原生处理整段不跑）
 ② 输入框插 `[. ](CDN 图链)`（表情看 `data-animated` → `.gif`／`.webp`；
 　　贴纸看 `data-format-type`：1=PNG、2=APNG、4=GIF 都出 `.png`/`.gif` 链，**3=Lottie 不接手**（发链对方只会拿到 JSON））
@@ -576,7 +576,7 @@ node tests/verify-cdn.js <channelId>   # 拉真实 Discord CDN 验证像素一�
 node build.js                  # 打四个包 (chrome / edge / firefox 三个 zip + moeguard.user.js)
 node build.js firefox          # 只打某一个扩展
 node build-user.js             # 只打油猴单文件
-node dev/run.js                # 真 Chrome 无头仿真台（63 条用例，跑约 1~2 分钟）
+node dev/run.js                # 真 Chrome 无头仿真台（61 条用例，跑约 1~2 分钟）
 ```
 
 > `lint-scope.mjs` 存在的理由：v3.6.5 的角标重叠 bug 是重构删了变量声明、

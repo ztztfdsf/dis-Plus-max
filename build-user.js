@@ -138,7 +138,7 @@ function patchHookGuard(src) {
  */
 function patchHookLogic(src) {
   /* ① 记住发送意图时刻 */
-  const A1 = '  function onSendIntent(why) {\n    if (!held.some((h) => h.state === \'held\')) return;';
+  const A1 = '  function onSendIntent(why) {\n    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n    if (!held.some((h) => h.state === \'held\' || h.state === \'registering\')) return;';
   must(src, A1, 'hook onSendIntent');
   src = src.replace(A1,
     '  let lastIntentAt = 0;   // 【油猴补丁①】最近一次【用户亲手】发送意图, 供「意图早于入队」补课\n'
@@ -147,7 +147,8 @@ function patchHookLogic(src) {
     + '     * 但它在发完消息之后才到 —— 记进去会让「发完上一条 → 3s 内拖新图」误判成\n'
     + '     * 「这张图也要立刻发」, 提前把图 PUT 上去。 */\n'
     + '    if (why === \'enter\' || why === \'send-button\') lastIntentAt = Date.now();\n'
-    + '    if (!held.some((h) => h.state === \'held\')) return;');
+    + '    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n'
+    + '    if (!held.some((h) => h.state === \'held\' || h.state === \'registering\')) return;');
 
   /* ② abort 置标志 (预处理期也能看见) */
   const A2 = '  XHRProto.abort = function () {\n    try {\n      const it = this.__moeHeld;';
@@ -156,26 +157,30 @@ function patchHookLogic(src) {
     '  XHRProto.abort = function () {\n    try {\n      this.__moeAbort = true;   // 【油猴补丁②】预处理期没有 __moeHeld, 只能靠标志\n'
     + '      const it = this.__moeHeld;');
 
-  /* ③ 入队前: 已取消就丢弃; 刚发生过发送意图就直接放行 */
-  const A3 = '          dropStale();\n          const item = {';
+  /* ③ 入队前: 已取消就丢弃 (入队点已被 placeholder 版改写, 锚点跟着换) */
+  const A3 = '          dropStale();\n          /* 字节/指纹就绪 → 原地升级占位项 (不新建, 保持引用不变) */';
   must(src, A3, 'hook 入队点');
   src = src.replace(A3,
     '          dropStale();\n'
     + '          /* 【油猴补丁②】预处理期已被 abort (删预览/切频道) → 不进队列, 也不补发 */\n'
-    + '          if (self.__moeAbort) { rec({ ev: \'hold-abort-pre\', ck: (ck || \'\').slice(0, 12) }); return; }\n'
-    + '          const item = {');
+    + '          if (self.__moeAbort) { placeholder.state = \'aborted\'; settleReg(placeholder); rec({ ev: \'hold-abort-pre\', ck: (ck || \'\').slice(0, 12) }); return; }\n'
+    + '          /* 字节/指纹就绪 → 原地升级占位项 (不新建, 保持引用不变) */');
 
-  const A4 = '          self.__moeHeld = item;\n          held.push(item);';
+  const A4 = '          placeholder.u8 = u8;\n          placeholder.mime = realMime;\n          placeholder.fp = fp;\n          placeholder.ck = ck;\n          placeholder.state = \'held\';\n          settleReg(placeholder);';
   must(src, A4, 'hook 入队 push');
   src = src.replace(A4,
-    '          self.__moeHeld = item;\n'
-    + '          held.push(item);\n'
+    '          placeholder.u8 = u8;\n'
+    + '          placeholder.mime = realMime;\n'
+    + '          placeholder.fp = fp;\n'
+    + '          placeholder.ck = ck;\n'
+    + '          placeholder.state = \'held\';\n'
+    + '          settleReg(placeholder);\n'
     + '          /* 【油猴补丁①】用户已经按过发送键才排队进来 → 立即按当时结论放行,\n'
     + '           * 不要干等 45s TTL (解码+指纹有几百毫秒, 手快就会踩到)。3s 窗口避免误伤\n'
     + '           * 「发上一条消息时刚按过 Enter」的正常场景。 */\n'
     + '          if (Date.now() - lastIntentAt < 3000) {\n'
-    + '            rec({ ev: \'intent-late\', id: item.id, fp: fpShort(fp) });\n'
-    + '            releaseOne(item, \'intent-late\').catch(() => {});\n'
+    + '            rec({ ev: \'intent-late\', id: placeholder.id, fp: fpShort(fp) });\n'
+    + '            releaseOne(placeholder, \'intent-late\').catch(() => {});\n'
     + '          }');
 
   /* ④ 放行前再检查一次取消态 */

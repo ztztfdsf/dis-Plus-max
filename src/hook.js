@@ -209,6 +209,44 @@
   const HOLD_TTL = 45 * 1000;           // 挂起上限: 超过就自己放行 (兜底, 避免悬空)
   const held = [];                       // [{id, xhr, url, hdrs, u8, mime, fp, sendArgs, state}]
   let heldSeq = 0;
+  /* 【同步占位登记】拖入太快+发送太快时: XHR send 返回 undefined(挂起) 与
+   * 字节登记进 held 之间有一段异步窗口 (bodyToU8 / 图片嗅探 / 指纹都是 await)。
+   * 用户在这个窗口里按发送 → releaseAll 看到 held 为空 → 消息先走,
+   * 图稍后才登记 → 没人再触发放行 → 等 45s TTL 原图放行 (未评分就发送, 实锤复现)。
+   * 修: send 拦截【命中上传 URL 的那一刻】就同步推一个 placeholder
+   * (state='registering'), releaseAll 先等所有 registering 落地再放行。 */
+  function registerPlaceholder(self, body) {
+    const it = {
+      id: ++heldSeq, xhr: self, url: self.__moeUrl, hdrs: self.__moeHdrs,
+      u8: null, mime: '', fp: null, ck: '', sendBody: body,
+      state: 'registering', at: Date.now(), reg: null,
+    };
+    it.reg = new Promise((res) => { it.regDone = res; });
+    self.__moeHeld = it;
+    held.push(it);
+    return it;
+  }
+  /** registering → held 的完成信号; 失败/放行/中止也要 resolve, 别让等待者悬死 */
+  function settleReg(it) { try { if (it.regDone) it.regDone(); } catch (e) {} }
+  /** 等 held 里全部 registering 项落地 (最多 waitMs, 超时按原图放行) */
+  function awaitRegistrations(waitMs) {
+    const regs = held.filter((h) => h.state === 'registering');
+    if (!regs.length) return Promise.resolve();
+    log({ ev: 'release-wait-registering', count: regs.length });
+    return Promise.race([
+      Promise.all(regs.map((h) => h.reg)),
+      new Promise((r) => setTimeout(r, Math.max(200, waitMs | 0))),
+    ]).then(() => {
+      // 超时还没落地的 → 直接标 held (拿不到字节, releaseOne 会按原图放)
+      for (const h of held) {
+        if (h.state === 'registering') {
+          rec({ ev: 'register-timeout', id: h.id, url: String(h.url || '').slice(0, 90) });
+          h.state = 'held';
+          settleReg(h);
+        }
+      }
+    });
+  }
 
   function dropStale() {
     const now = Date.now();
@@ -228,6 +266,15 @@
     if (idx >= 0) held.splice(idx, 1);
     if (item.state !== 'held') { rec({ ev: 'release-skip', id: item.id, state: item.state }); return; }
     item.state = 'releasing';
+
+    /* 登记超时的占位项: 拿不到字节无从评分/混淆 → 原样放行 (失败必须外显) */
+    if (!item.u8) {
+      rec({ ev: 'release-empty', id: item.id, trigger, url: String(item.url || '').slice(0, 90) });
+      log({ ev: 'upload-pass', why: 'register-timeout-no-bytes' });
+      item.state = 'sent';
+      try { origSend.call(item.xhr, item.sendBody); } catch (e2) {}
+      return;
+    }
 
     let body = null, label = '原图', why = '';
     try {
@@ -299,10 +346,13 @@
   /** 用户按发送 → 放行所有挂起的 PUT (按当时结论), 全部完成后再发消息 */
   function releaseAll(trigger) {
     dropStale();
-    const items = held.filter((h) => h.state === 'held');
-    rec({ ev: 'release-all', trigger, count: items.length,
-          decisions: decisions.map((d) => ({ fp: fpShort(d.fp), obf: !!d.obfuscate, man: !!d.manual })) });
-    return Promise.all(items.map((it) => releaseOne(it, trigger)));
+    /* 先等正在登记中的占位项落地 (拖入快+发送快的窗口), 否则这些图会被漏掉 */
+    return awaitRegistrations(3000).then(() => {
+      const items = held.filter((h) => h.state === 'held');
+      rec({ ev: 'release-all', trigger, count: items.length,
+            decisions: decisions.map((d) => ({ fp: fpShort(d.fp), obf: !!d.obfuscate, man: !!d.manual })) });
+      return Promise.all(items.map((it) => releaseOne(it, trigger)));
+    });
   }
 
   /* ═══════════════════════════════════════════════════════════════
@@ -340,8 +390,11 @@
     } catch (e) { return false; }
   }
   function onSendIntent(why) {
-    if (!held.some((h) => h.state === 'held')) return;
-    rec({ ev: 'send-intent', why, held: held.filter((h) => h.state === 'held').length });
+    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */
+    if (!held.some((h) => h.state === 'held' || h.state === 'registering')) return;
+    rec({ ev: 'send-intent', why,
+          held: held.filter((h) => h.state === 'held').length,
+          registering: held.filter((h) => h.state === 'registering').length });
     releaseAll('intent:' + why);
   }
   document.addEventListener('keydown', (e) => {
@@ -469,15 +522,19 @@
       log({ ev: 'upload-seen', url: String(this.__moeUrl).slice(0, 90) });
 
       /* 【挂住上传】不立刻发 —— 只记进队列, 等按发送键才按当时结论编码并放行。
-       * 这样用户切多少次开关都不产生流量, 发出去的一定是最终结论。 */
+       * 这样用户切多少次开关都不产生流量, 发出去的一定是最终结论。
+       * 命中上传 URL 的同一时刻先同步占位 (registering),
+       * 防止「send 返回 → 字节登记完成」之间按发送把这笔 PUT 漏掉。 */
       const args = arguments;
+      const self = this;
+      const placeholder = registerPlaceholder(self, body);
       bodyToU8(body).then(async (u8) => {
         try {
-          if (!u8) { log({ ev: 'upload-pass', why: 'body-not-bytes:' + (body && body.constructor ? body.constructor.name : typeof body) }); return origSend.apply(self, args); }
+          if (!u8) { placeholder.state = 'aborted'; settleReg(placeholder); log({ ev: 'upload-pass', why: 'body-not-bytes:' + (body && body.constructor ? body.constructor.name : typeof body) }); return origSend.apply(self, args); }
           const mime = sniffImage(u8);
-          if (!mime) { log({ ev: 'upload-pass', why: 'not-image bytes[0..3]=' + Array.from(u8.slice(0, 4)).join(',') }); return origSend.apply(self, args); }
+          if (!mime) { placeholder.state = 'aborted'; settleReg(placeholder); log({ ev: 'upload-pass', why: 'not-image bytes[0..3]=' + Array.from(u8.slice(0, 4)).join(',') }); return origSend.apply(self, args); }
           if (mime === 'image/gif' || mime === 'image/webp-animated') {
-            if (cfg.skipAnimated) { log({ ev: 'skipped', name: 'upload', msg: '动画图原样发送' }); return origSend.apply(self, args); }
+            if (cfg.skipAnimated) { placeholder.state = 'aborted'; settleReg(placeholder); log({ ev: 'skipped', name: 'upload', msg: '动画图原样发送' }); return origSend.apply(self, args); }
           }
           const realMime = mime === 'image/webp-animated' ? 'image/webp' : mime;
           // 算指纹 + 内容键 (给结论匹配用); 失败也不影响挂起
@@ -488,13 +545,14 @@
             fp = Core.perceptualTag(im);
           } catch (e) {}
           dropStale();
-          const item = {
-            id: ++heldSeq, xhr: self, url: self.__moeUrl, hdrs: self.__moeHdrs,
-            u8, mime: realMime, fp, ck, sendBody: body, state: 'held', at: Date.now(),
-          };
-          self.__moeHeld = item;
-          held.push(item);
-          rec({ ev: 'hold', id: item.id, fp: fpShort(fp), ck: ck.slice(0, 12), bytes: u8.length, mime: realMime, heldTotal: held.length });
+          /* 字节/指纹就绪 → 原地升级占位项 (不新建, 保持引用不变) */
+          placeholder.u8 = u8;
+          placeholder.mime = realMime;
+          placeholder.fp = fp;
+          placeholder.ck = ck;
+          placeholder.state = 'held';
+          settleReg(placeholder);
+          rec({ ev: 'hold', id: placeholder.id, fp: fpShort(fp), ck: ck.slice(0, 12), bytes: u8.length, mime: realMime, heldTotal: held.length });
           log({ ev: 'tracked', name: 'upload', size: u8.length, type: realMime });
           // 不调 origSend —— 等 releaseAll
         } catch (e) {
@@ -502,6 +560,8 @@
           try { return origSend.apply(self, args); } catch (e2) {}
         }
       }).catch((e) => {
+        settleReg(placeholder);
+        if (placeholder.state === 'registering') placeholder.state = 'aborted';
         log({ ev: 'error', msg: 'xhr-body: ' + (e && e.message ? e.message : e) });
         try { origSend.apply(self, args); } catch (e2) {}
       });

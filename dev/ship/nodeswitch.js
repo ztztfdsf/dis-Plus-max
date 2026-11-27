@@ -1,4 +1,4 @@
-/* 逐个节点试 uploads.github.com 能不能连通 (当前节点 ECONNRESET)
+﻿/* 逐个节点试 uploads.github.com 能不能连通 (当前节点 ECONNRESET)
  * 用法: node dev/ship/nodeswitch.js [最多试几个]
  * 做法: 通过 FlClashCore 的 9090 控制器切节点 → 用 7890 代理发一次 GET 探
  * 找到能通的就停下并保持; 全不通则恢复原来的节点 */
@@ -7,7 +7,7 @@ const CTRL = 'http://127.0.0.1:9090';
 const SECRET = 'ff587GHhwZpPx0d3RjoIHnd0hFZiTc5f';
 const H = { Authorization: 'Bearer ' + SECRET };
 const PROXY = 'http://127.0.0.1:7890';
-const GROUPS = ['极速机场', 'GLOBAL', '自动选择'];
+const GROUPS = ['GLOBAL', '自动选择'];
 const LIMIT = Number(process.argv[2] || 10);
 
 const hx = new (require('node:https').Agent)();
@@ -56,7 +56,7 @@ async function probe(url, ms) {
       }
     }
     await new Promise((r) => setTimeout(r, 500));
-    const up = await probe('https://uploads.github.com/', 12000);
+    const up = await probe('https://www.apkmonk.com/app/com.discord/', 12000);
     const api = await probe('https://api.github.com/zen', 12000);
     console.log('  ' + name.padEnd(24) + ' uploads=' + up + '  api=' + api);
     if (up.indexOf('HTTP') === 0) { win = name; break; }

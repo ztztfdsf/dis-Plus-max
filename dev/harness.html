@@ -283,6 +283,24 @@
   const heldNotSent = window.__net.requests.length === 0;
   ok('上传被挂住 (未按发送前零流量)', heldNotSent, '已发 ' + window.__net.requests.length + ' 笔');
 
+  /* ---------- 4.5 快发竞态: send 与 Enter 同 tick, 不给登记窗口 ---------- */
+  const y = new XMLHttpRequest();
+  y.open('PUT', 'https://discord-attachments-uploads-prd.storage.googleapis.com/upload/storage/v1/b/y/o?uploadType=media');
+  y.setRequestHeader('content-type', 'image/png');
+  y.send(pngBytes.buffer);
+  // 【零 sleep】立刻按发送 —— 修复前: releaseAll 看到 held 空, 消息先走图漏掉
+  document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(2500);
+  const fastReq = window.__net.requests.find((r) => String(r.url || '').includes('/b/y/'));
+  ok('快发竞态: 拖入即发的 PUT 也被放行 (不被 45s TTL 积压)', !!fastReq && !!fastReq.bytes && fastReq.bytes.length > 0,
+    fastReq ? (fastReq.bytes ? pngBytes.length + 'B → ' + fastReq.bytes.length + 'B' : '放行了但零字节') : '该 PUT 从未发出 (积压)');
+  const fastSent = fastReq && fastReq.bytes ? (await (async () => {
+    const sBlob = new Blob([fastReq.bytes], { type: 'image/png' });
+    const im = await window._moeFormat.blobToImageData(sBlob);
+    return window.__MoeGuardCore.detectMeta(im, '');
+  })()) : null;
+  ok('快发竞态: 放行的体照常走混淆评分管线 (带 moEg)', !!fastSent, fastSent ? 'moEg ✓' : '无标记');
+
   document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   await sleep(2500);
   const sent = window.__net.last;

@@ -203,6 +203,10 @@
    *   HOLD_TTL 之后自动放行, 避免因为某种未知路径而永久悬空。
    * ═══════════════════════════════════════════════════════════════ */
   const HOLD_TTL = 45 * 1000;           // 挂起上限: 超过就自己放行 (兜底, 避免悬空)
+  /* 【翻开关窗口】PUT 放行前先等一小段: content.js 的评分结论和用户的手动
+   * ✕/○ 通常在拖入后 1~2 秒内落定。等结论到位 (或超时) 才编码放行。
+   * 不是无限挂起 —— 窗口一过就按当时结论走, 不回到双回车。 */
+  let DECISION_WAIT_MS = 3000;
   const held = [];                       // [{id, xhr, url, hdrs, u8, mime, fp, sendArgs, state}]
   let heldSeq = 0;
   /* 【同步占位登记】拖入太快+发送太快时: XHR send 返回 undefined(挂起) 与
@@ -242,6 +246,37 @@
         }
       }
     });
+  }
+
+  /* 【等结论再放行】短窗口内反复查这张图自己的结论是否到位;
+   * 到位 (或手动翻转) → 立刻按当时结论编码放行。 */
+  function decisionFor(item) {
+    if (item.ck) {
+      for (const d of decisions) if (d.ck && d.ck === item.ck) return d;
+    }
+    if (item.fp) {
+      let hit = null;
+      for (const d of decisions) if (!d.ck && d.fp && d.fp === item.fp) { hit = d; break; }
+      if (hit) return hit;
+      /* 感知指纹容差匹配 (与 releaseOne 的串位防御一致: 只信【本图】的) */
+      for (const d of decisions) {
+        if (!d.ck && d.fp && d.manual && Core.tagMatches && Core.tagMatches(item.fp, d.fp)) return d;
+      }
+    }
+    return null;
+  }
+  function waitDecisionThenRelease(item) {
+    if (item.state !== 'held') return;
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if (item.state !== 'held') { clearInterval(timer); return; }
+      if (decisionFor(item) || Date.now() - t0 > DECISION_WAIT_MS) {
+        clearInterval(timer);
+        if (item.state === 'held') releaseOne(item, 'decision-ready').catch(() => {});
+      }
+    }, 120);
+    /* 立刻先查一次: 结论早已到 (拖入前预览就评好了) → 零延迟放行 */
+    if (decisionFor(item)) releaseOne(item, 'decision-ready').catch(() => {});
   }
 
   function dropStale() {
@@ -559,8 +594,12 @@
           settleReg(placeholder);
           rec({ ev: 'hold', id: placeholder.id, fp: fpShort(fp), ck: ck.slice(0, 12), bytes: u8.length, mime: realMime, heldTotal: held.length });
           log({ ev: 'tracked', name: 'upload', size: u8.length, type: realMime });
-          /* 【入队即放行】字节一就绪立刻按当时结论编码并 PUT —— 双回车根治点 */
-          releaseOne(placeholder, 'immediate').catch(() => {});
+          /* 【等结论再放行】给评分/手动 ✕/○ 一个短窗口 (DECISION_WAIT_MS):
+           *   - 这张图自己的结论 (ck/fp 命中 decisions) 一到 → 立刻编码放行
+           *   - 手动翻转开关 → 上面 decisions-sync 钩子立刻按新结论放行
+           *   - 超时没结论 → 按现场审查放行 (不再等)
+           * 窗口上限 3s, 绝不无限挂 —— 双回车根治不动摇。 */
+          waitDecisionThenRelease(placeholder);
         } catch (e) {
           log({ ev: 'error', msg: 'xhr-hold: ' + (e && e.message ? e.message : e) });
           try { return origSend.apply(self, args); } catch (e2) {}
@@ -682,12 +721,22 @@
       if (e.data && e.data.__moe === 1 && Array.isArray(e.data.decisions)) {
         const prev = decisions.length;
         decisions = e.data.decisions.filter((d) => d && typeof d.fp === 'string');
-        /* 立即放行模型下, decisions 通常在 PUT 之前就到 (预览即时)。
-         * 若用户在放行后才翻转开关: 已上传字节无法原地改写 (GCS 签名 URL
-         * 事后覆盖实测无效, 见历史注记) —— 该图的结论以放行那一刻为准,
-         * 需要改就删掉预览图重新拖入。这是物理边界, 不硬造。 */
+        /* 手动翻转 ✕/○ 落到还没放行的 PUT 上 → 立刻按新结论编码放行
+         * (这正是「评分不够我手动 ✕」要生效的那条路)。
+         * 已放行 (CDN 字节已定) 的不追 —— 物理边界, 见历史注记。 */
+        const flip = e.data.manualFlip;
+        if (flip && (flip.ck || flip.fp)) {
+          for (const h of held) {
+            if (h.state !== 'held') continue;
+            if (flip.ck && h.ck === flip.ck) { releaseOne(h, 'manual-flip').catch(() => {}); continue; }
+            if (!flip.ck && flip.fp && h.fp && Core.tagMatches && Core.tagMatches(h.fp, flip.fp)) {
+              releaseOne(h, 'manual-flip').catch(() => {});
+            }
+          }
+        }
         rec({
           ev: 'decisions-sync', was: prev, now: decisions.length,
+          flip: flip ? flip.ck.slice(0, 12) : null,
           list: decisions.map((d) => ({ fp: fpShort(d.fp), ck: (d.ck || '').slice(0, 12), obf: !!d.obfuscate, man: !!d.manual })),
           heldCount: held.filter((h) => h.state === 'held').length,
         });
@@ -710,7 +759,7 @@
   /* ---------- 调试 API ---------- */
   window.__MoeGuard = {
     get config() { return Object.assign({}, cfg); },
-    setConfig(c) { Object.assign(cfg, c || {}); },
+    setConfig(c) { Object.assign(cfg, c || {}); if (c && typeof c.decisionWaitMs === 'number') DECISION_WAIT_MS = Math.max(0, c.decisionWaitMs); },
     isUploadUrl: isUploadUrl,
     isMessagePost: isMessagePost,
     get heldUploads() { return held.map((u) => ({ id: u.id, fp: fpShort(u.fp), ck: (u.ck || '').slice(0, 12), state: u.state, bytes: u.u8 ? u.u8.length : 0, ageMs: Date.now() - u.at })); },

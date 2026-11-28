@@ -279,7 +279,7 @@
   x.open('PUT', 'https://discord-attachments-uploads-prd.storage.googleapis.com/upload/storage/v1/b/x/o?uploadType=media');
   x.setRequestHeader('content-type', 'image/webp');
   x.send(pngBytes.buffer);
-  await sleep(1500);
+  await sleep(3600);          // 决策窗口 (3s) 过后自动放行
   /* 2026-11-28 模型反转: 不再「挂住等按键」, 而是【入队即编码立即放行】——
    * 断言反过来: 无需任何按键, PUT 已自动放行且字节已换 (零流量断言废止)。 */
   const autoReq = window.__net.requests.find((r) => String(r.url || '').includes('/b/x/'));
@@ -297,7 +297,7 @@
   y.send(pngBytes.buffer);
   // 【零 sleep】立刻按发送 —— 修复前: releaseAll 看到 held 空, 消息先走图漏掉
   document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await sleep(2500);
+  await sleep(3600);
   const fastReq = window.__net.requests.find((r) => String(r.url || '').includes('/b/y/'));
   ok('快发竞态: 拖入即发的 PUT 也被放行 (不被 45s TTL 积压)', !!fastReq && !!fastReq.bytes && fastReq.bytes.length > 0,
     fastReq ? (fastReq.bytes ? pngBytes.length + 'B → ' + fastReq.bytes.length + 'B' : '放行了但零字节') : '该 PUT 从未发出 (积压)');
@@ -309,7 +309,7 @@
   ok('快发竞态: 放行的体照常走混淆评分管线 (带 moEg)', !!fastSent, fastSent ? 'moEg ✓' : '无标记');
 
   document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await sleep(2500);
+  await sleep(3600);
   const sent = window.__net.last;
   ok('按 Enter 后放行且换了体', !!sent && !!sent.bytes && sent.bytes.length > 0,
     sent && sent.bytes ? (pngBytes.length + 'B → ' + sent.bytes.length + 'B') : 'no-body');
@@ -444,7 +444,7 @@
   xb.send(pngBytes.buffer);
   // 同一 tick 就按发送: 此刻 held 还是空的, 上游会丢弃这条意图 → 只能等 45s
   document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-  await sleep(3000);
+  await sleep(3600);
   ok('补丁①: 意图早于入队 → 3s 内已放行',
     window.__net.requests.length > beforeLate,
     '新增 ' + (window.__net.requests.length - beforeLate) + ' 笔');

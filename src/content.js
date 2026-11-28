@@ -575,12 +575,13 @@
     }
     if (own) Object.assign(own, stamped);
     else decisions.push(Object.assign({ fp: fp }, stamped));
-    pushDecisions();
+    pushDecisions(stamped.manual ? { ck: stamped.ck || '', fp: stamped.fp || fp } : null);
   }
-  function pushDecisions() {
+  function pushDecisions(manualFlip) {
     window.postMessage({
       __moe: 1,
       decisions: decisions.map((d) => ({ fp: d.fp, ck: d.ck || '', obfuscate: !!d.obfuscate, manual: !!d.manual, at: d.at || 0 })),
+      manualFlip: manualFlip || null,     // {ck} — 手动翻开关: hook 立刻放行还没发的 PUT
     }, '*');
   }
 

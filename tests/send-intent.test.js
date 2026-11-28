@@ -49,11 +49,13 @@ function fixture({ hostQueues = false, enabled = true } = {}) {
     window: win, document, XMLHttpRequest: Xhr, Uint8Array, ArrayBuffer, Blob, Event,
     KeyboardEvent: KbEvent, DragEvent, ClipboardEvent, Headers,
     DataTransfer: class { constructor() { this.files = []; this.items = { add: f => (this.files.push(f), true) }; } setData() {} getData() { return ''; } },
-    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout, setInterval: () => 0, console: { warn() {}, error() {} },
+    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout,
+    setInterval: (fn, ms) => { const t = setInterval(fn, ms); try { t.unref(); } catch (e) {} return t; }, clearInterval, console: { warn() {}, error() {} },
     location: { origin: 'https://fixture.invalid', pathname: '/channels/1/2' },
   };
   vm.runInNewContext(source, sandbox, { filename: 'src/hook.js' });
   assert.ok(win.__MoeGuard, 'hook failed to install');
+  try { win.__MoeGuard.setConfig({ decisionWaitMs: 120 }); } catch (e) {}
   win.__MoeGuard.setConfig ? win.__MoeGuard.setConfig({ enabled }) : null;
   win.postMessage.__cfg = { enabled };
 

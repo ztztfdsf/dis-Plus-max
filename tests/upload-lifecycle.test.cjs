@@ -29,8 +29,9 @@ function fixture(code, { encodeThrows = false, alreadyMoe = false, slowEncode = 
   }
   const editor = { isConnected: true, closest: () => editor };
   editor.dispatchEvent = (ev) => { for (const cb of docListeners.keydown || []) cb(ev); return true; };
+  const winListeners = {};
   const win = {
-    XMLHttpRequest: Xhr, addEventListener() {}, postMessage() {},
+    XMLHttpRequest: Xhr, addEventListener(k, cb) { (winListeners[k] ||= []).push(cb); }, postMessage() {},
     __MoeGuardCore: {
       contentKey: () => 'ck', perceptualTag: () => 'tag', tagMatches: () => false,
       detectMeta: () => alreadyMoe,
@@ -52,11 +53,17 @@ function fixture(code, { encodeThrows = false, alreadyMoe = false, slowEncode = 
     KeyboardEvent: class { constructor(t, i = {}) { Object.assign(this, i); this.defaultPrevented = false; }
       preventDefault() { this.defaultPrevented = true; } stopImmediatePropagation() {} },
     Headers, console: { warn() {}, error() {} },
-    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout, setInterval: () => 0,
+    setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout,
+    setInterval: (fn, ms) => { const t = setInterval(fn, ms); try { t.unref(); } catch (e) {} return t; }, clearInterval,
     location: { origin: 'https://fixture.invalid', pathname: '/channels/1/2' },
   });
   assert.ok(win.__MoeGuard, 'hook failed to install');
+  try { win.__MoeGuard.setConfig({ decisionWaitMs: 150 }); } catch (e) {}
   return {
+    /* 模拟 content.js 手动翻 ✕/○: decisions + manualFlip 消息 */
+    flip(ck, obf) {
+      for (const cb of winListeners.message || []) cb({ data: { __moe: 1, decisions: [{ fp: 'tag', ck, obfuscate: obf, manual: true, at: Date.now() }], manualFlip: { ck, fp: 'tag' } } });
+    },
     get sends() { return sends; }, get encodeCalls() { return encodeCalls; }, get aborted() { return aborted; },
     editor,
     upload(bytes = PNG) {
@@ -74,10 +81,10 @@ function fixture(code, { encodeThrows = false, alreadyMoe = false, slowEncode = 
 }
 
 for (const [name, code] of Object.entries(variants)) {
-  test(name + ': 字节就绪即自动放行 PUT (immediate-release, 无需按键)', async () => {
+  test(name + ': 决策窗口短 (无结论) → 窗口一过自动放行, 无需按键', async () => {
     const f = fixture(code);
     f.upload();
-    await tick(30);
+    await tick(400);          // decisionWaitMs=150 → 窗口过后自动放行
     assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '无需按键就应放行');
     f.press();
     assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '按键不产生第二笔 PUT');
@@ -121,6 +128,30 @@ for (const [name, code] of Object.entries(variants)) {
     f.press();
     await settle();
     assert.equal(f.encodeCalls, 0);
+  });
+
+  test(name + ': 评分不够 → 手动 ✕ 翻转 (窗口内) → 放行的字节是混淆图', async () => {
+    const f = fixture(code, { slowEncode: true });
+    f.upload();
+    await tick(80);                 // 还在决策窗口内 (150ms) 且编码未跑完
+    f.flip('ck', true);             // 模拟用户点 ✕: 手动要混淆
+    await settle();                 // 手动翻转 → 立刻按新结论放行
+    const put = f.sends.filter(s => s.method === 'PUT');
+    assert.equal(put.length, 1, '正好一笔 PUT');
+    assert.ok(put[0].body && put[0].body.byteLength > 0, '有字节');
+    assert.equal(f.encodeCalls, 1, '编码器跑了一次 (混淆)');
+  });
+
+  test(name + ': 评分够了 → 手动 ○ 翻转 (窗口内) → 放行的是原图零编码', async () => {
+    const f = fixture(code, { slowEncode: true });
+    f.upload();
+    await tick(80);
+    f.flip('ck', false);            // 手动取消混淆
+    await settle();
+    const put = f.sends.filter(s => s.method === 'PUT');
+    assert.equal(put.length, 1);
+    assert.equal(f.encodeCalls, 0, '不该编码 (原图直通)');
+    assert.ok(put[0].body && put[0].body.byteLength > 0, '原始字节放行');
   });
 
   test(name + ': 登记期取消（abort 先于编码完成）→ 不上传', async () => {

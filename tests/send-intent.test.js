@@ -129,14 +129,16 @@ test('纯文本：一次 Enter 就是一次 POST，附件路径不参与', async
   assert.deepEqual(f.sends, ['POST']);
 });
 
-test('有附件时: 上传自动完成后一次 Enter 就发出去 (immediate-release, 不扣键)', async () => {
+test('有附件时: PUT 挂着, Enter 那一刻零延迟放行 (预编码, 不扣键)', async () => {
   const f = fixture({ hostQueues: false });
   f.attach();
-  await settle();                  // 字节登记 + 立即编码 + PUT 自动跑完
-  assert.ok(f.pendingCount > 0, 'PUT 应已自动放行');
+  await settle();                  // 字节登记 + 预编码完成 (PUT 仍挂起)
+  assert.equal(f.pendingCount, 0, '没按 Enter 前不该有 PUT 流量');
+  f.enter();                       // Enter = 放行信号 (键盘原生, 未拦截)
+  await tick(10);
+  assert.ok(f.pendingCount > 0, 'Enter 后 PUT 零延迟放行');
   f.ackAll();                      // 上传 loadend
   await tick(10);
-  f.enter();                       // 上传已完成 → 原生直达, 一次就够
   assert.equal(f.posts, 1, '一次回车一条消息');
   const e = f.log.filter(x => x.ev === 'release' || x.ev === 'release-decide');
   assert.ok(e.length >= 1, '放行有记录');

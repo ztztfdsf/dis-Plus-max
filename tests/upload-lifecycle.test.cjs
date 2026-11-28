@@ -81,35 +81,42 @@ function fixture(code, { encodeThrows = false, alreadyMoe = false, slowEncode = 
 }
 
 for (const [name, code] of Object.entries(variants)) {
-  test(name + ': 决策窗口短 (无结论) → 窗口一过自动放行, 无需按键', async () => {
+  test(name + ': PUT 挂着不放 (无按键零流量), 按 Enter 才放行', async () => {
     const f = fixture(code);
     f.upload();
-    await tick(400);          // decisionWaitMs=150 → 窗口过后自动放行
-    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '无需按键就应放行');
+    await tick(400);          // 超时预编码跑完, 但不放行
+    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 0, '没按键就不该有 PUT');
     f.press();
-    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '按键不产生第二笔 PUT');
+    await settle();
+    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '按键后放行一笔');
+    f.press();
+    await tick(60);
+    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '第二笔按键不产生第二笔 PUT');
   });
 
   test(name + ': 编码失败 → 仍按原图放行（不阻断、不弹窗、不丢附件）', async () => {
     const f = fixture(code, { encodeThrows: true });
     f.upload();
-    await tick(30);
+    await tick(400);          // 超时预编码: 编码器被调, 抛错 → preBody null
     f.press();
     await settle();
     const put = f.sends.filter(s => s.method === 'PUT');
     assert.equal(put.length, 1, '附件必须照常上传');
-    assert.equal(f.encodeCalls, 1, '编码确实被尝试过一次');
+    assert.ok(f.encodeCalls >= 1, '编码确实被尝试过');
     assert.ok(f.log.some(e => e.ev === 'release'), '放行事件有记录');
   });
 
-  test(name + ': 正常编码 → 放行的字节被替换为 PNG', async () => {
+  test(name + ': 正常编码 → 按 Enter 后放行的字节是混淆 PNG', async () => {
     const f = fixture(code);
     f.upload();
-    await tick(30);
+    await tick(400);          // 超时预编码完成 (混淆)
+    assert.equal(f.sends.length, 0, '没按键不放行');
     f.press();
     await settle();
     assert.ok(f.encodeCalls >= 1);
     assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1);
+    const put = f.sends.filter(s => s.method === 'PUT');
+    assert.notEqual(put[0].body.byteLength, PNG.length, '字节被替换');
   });
 
   test(name + ': 已经是喵图 → 不重复编码', async () => {
@@ -130,28 +137,51 @@ for (const [name, code] of Object.entries(variants)) {
     assert.equal(f.encodeCalls, 0);
   });
 
-  test(name + ': 评分不够 → 手动 ✕ 翻转 (窗口内) → 放行的字节是混淆图', async () => {
+  test(name + ': 评分不够 → 手动 ✕ 翻转 → 按 Enter 发出的是混淆图', async () => {
     const f = fixture(code, { slowEncode: true });
     f.upload();
-    await tick(80);                 // 还在决策窗口内 (150ms) 且编码未跑完
-    f.flip('ck', true);             // 模拟用户点 ✕: 手动要混淆
-    await settle();                 // 手动翻转 → 立刻按新结论放行
+    await tick(60);                 // 挂着, 编码未跑
+    f.flip('ck', true);             // 用户点 ✕: 手动要混淆
+    await tick(500);                // 重编完成 (慢编码 200ms)
+    assert.equal(f.sends.length, 0, '翻转不产生流量');
+    f.press();
+    await settle();
     const put = f.sends.filter(s => s.method === 'PUT');
     assert.equal(put.length, 1, '正好一笔 PUT');
     assert.ok(put[0].body && put[0].body.byteLength > 0, '有字节');
     assert.equal(f.encodeCalls, 1, '编码器跑了一次 (混淆)');
   });
 
-  test(name + ': 评分够了 → 手动 ○ 翻转 (窗口内) → 放行的是原图零编码', async () => {
+  test(name + ': 评分够了 → 手动 ○ 翻转 → 按 Enter 发原图零编码', async () => {
     const f = fixture(code, { slowEncode: true });
     f.upload();
-    await tick(80);
+    await tick(60);
     f.flip('ck', false);            // 手动取消混淆
+    await tick(300);                // 重编: obf=false → 不调编码器
+    f.press();
     await settle();
     const put = f.sends.filter(s => s.method === 'PUT');
     assert.equal(put.length, 1);
     assert.equal(f.encodeCalls, 0, '不该编码 (原图直通)');
     assert.ok(put[0].body && put[0].body.byteLength > 0, '原始字节放行');
+  });
+
+  test(name + ': 反复翻转 (✕→○→✕) → 最后一次结论生效', async () => {
+    const f = fixture(code, { slowEncode: false });
+    f.upload();
+    await tick(60);
+    f.flip('ck', true);
+    await tick(150);
+    f.flip('ck', false);
+    await tick(150);
+    f.flip('ck', true);
+    await tick(250);
+    f.press();
+    await settle();
+    const put = f.sends.filter(s => s.method === 'PUT');
+    assert.equal(put.length, 1);
+    assert.ok(f.encodeCalls >= 2, '✕ 至少编了两次 (中间 ○ 那次不编码)');
+    assert.notEqual(put[0].body.byteLength, PNG.length, '发出的是混淆字节');
   });
 
   test(name + ': 登记期取消（abort 先于编码完成）→ 不上传', async () => {

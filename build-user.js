@@ -183,12 +183,12 @@ function patchHookLogic(src) {
     + '          placeholder.ck = ck;\n'
     + '          placeholder.state = \'held\';\n'
     + '          settleReg(placeholder);\n'
-    + '          /* 【油猴补丁①】用户已经按过发送键才排队进来 → 立即按当时结论放行,\n'
+    + '          /* 【油猴补丁①】用户已经按过发送键才排队进来 → 改挂起模型: 只做预编码, 放行交给 POST /messages 兜底,\n'
     + '           * 不要干等 45s TTL (解码+指纹有几百毫秒, 手快就会踩到)。3s 窗口避免误伤\n'
     + '           * 「发上一条消息时刚按过 Enter」的正常场景。 */\n'
-    + '          if (Date.now() - lastIntentAt < 3000) {\n'
+    + '          if (false) {   // 挂起模型: intent-late 自动放行已废\n'
     + '            rec({ ev: \'intent-late\', id: placeholder.id, fp: fpShort(fp) });\n'
-    + '            releaseOne(placeholder, \'intent-late\').catch(() => {});\n'
+    + '            preencode(placeholder);\n'
     + '          }');
 
   /* ④ 放行前再检查一次取消态 */

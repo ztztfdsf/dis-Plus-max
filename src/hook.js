@@ -203,9 +203,11 @@
    *   HOLD_TTL 之后自动放行, 避免因为某种未知路径而永久悬空。
    * ═══════════════════════════════════════════════════════════════ */
   const HOLD_TTL = 45 * 1000;           // 挂起上限: 超过就自己放行 (兜底, 避免悬空)
-  /* 【翻开关窗口】PUT 放行前先等一小段: content.js 的评分结论和用户的手动
-   * ✕/○ 通常在拖入后 1~2 秒内落定。等结论到位 (或超时) 才编码放行。
-   * 不是无限挂起 —— 窗口一过就按当时结论走, 不回到双回车。 */
+  /* 【预编码·挂起模型】PUT 一直挂着不传 (同 3.8.0 语义: 开关翻到发送前都算数),
+   * 但结论一到就【预先编码】把 body 做好 —— 按发送那一刻 origSend 的延迟≈0,
+   * Discord 的草稿队列接得住 (附件 0%→就绪 的窗口压到最短)。
+   * 8 秒还没结论 → 现场审查结论先编出来占位; 开关再翻就重编 (纯本地, 零流量)。
+   * 45s TTL 兜底放行, 绝不无限悬空。 */
   let DECISION_WAIT_MS = 3000;
   const held = [];                       // [{id, xhr, url, hdrs, u8, mime, fp, sendArgs, state}]
   let heldSeq = 0;
@@ -248,35 +250,55 @@
     });
   }
 
-  /* 【等结论再放行】短窗口内反复查这张图自己的结论是否到位;
-   * 到位 (或手动翻转) → 立刻按当时结论编码放行。 */
+  /* 【找这张图自己的结论】ck 精确优先, 指纹严格相等次之, 容差只信手动 */
   function decisionFor(item) {
     if (item.ck) {
       for (const d of decisions) if (d.ck && d.ck === item.ck) return d;
     }
     if (item.fp) {
-      let hit = null;
-      for (const d of decisions) if (!d.ck && d.fp && d.fp === item.fp) { hit = d; break; }
-      if (hit) return hit;
-      /* 感知指纹容差匹配 (与 releaseOne 的串位防御一致: 只信【本图】的) */
+      for (const d of decisions) if (!d.ck && d.fp && d.fp === item.fp) return d;
       for (const d of decisions) {
         if (!d.ck && d.fp && d.manual && Core.tagMatches && Core.tagMatches(item.fp, d.fp)) return d;
       }
     }
     return null;
   }
-  function waitDecisionThenRelease(item) {
-    if (item.state !== 'held') return;
-    const t0 = Date.now();
-    const timer = setInterval(() => {
-      if (item.state !== 'held') { clearInterval(timer); return; }
-      if (decisionFor(item) || Date.now() - t0 > DECISION_WAIT_MS) {
-        clearInterval(timer);
-        if (item.state === 'held') releaseOne(item, 'decision-ready').catch(() => {});
-      }
-    }, 120);
-    /* 立刻先查一次: 结论早已到 (拖入前预览就评好了) → 零延迟放行 */
-    if (decisionFor(item)) releaseOne(item, 'decision-ready').catch(() => {});
+  /* 【预编码·挂起】结论一到就先把编码 body 做好挂在 item 上 (不放行);
+   * 手动翻转 → 重编 (纯本地零流量); 超时没结论 → 现场审查先编一版占位。
+   * 放行统一走 send-intent (Enter/按钮/POST) 与 45s TTL。 */
+  function preencode(item) {
+    if (item.state !== 'held' || item.encoding) return;
+    item.encoding = true;
+    (async () => {
+      try {
+        const d = decisionFor(item);
+        const act = d
+          ? { obfuscate: !!d.obfuscate, score: d.score == null ? null : d.score, source: 'pre:' + (d.manual ? 'manual' : 'auto') }
+          : null;
+        if (act) { await encodeInto(item, act); item.encoded = true; rec({ ev: 'pre-encode', id: item.id, as: act.obfuscate ? '混淆图' : '原图', source: act.source }); }
+      } catch (e) {
+        rec({ ev: 'pre-encode-err', id: item.id, err: String(e && e.message || e) });
+      } finally { item.encoding = false; }
+    })();
+  }
+  /* releaseOne 的编码体抽取成可复用函数: 结论 → body (或 null=原图) */
+  async function encodeInto(item, act) {
+    let body = null;
+    const img = await FMT.blobToImageData(new Blob([item.u8], { type: item.mime }));
+    if (act.obfuscate && !Core.detectMeta(img, cfg.salt)) {
+      const t0 = Date.now();
+      const src = cfg.maxDim > 0 ? FMT.resizeImageData(img, cfg.maxDim) : img;
+      const enc = Core.encodeImage(src, { tile: cfg.tile || undefined, salt: cfg.salt });
+      let chunks = null;
+      try { chunks = Core.pngGetTextChunks(item.u8); } catch (e) {}
+      const blob = await FMT.encodedToBlob(enc, chunks);
+      body = await blob.arrayBuffer();
+      rec({ ev: 'encode', id: item.id, in: item.u8.length, out: body.byteLength, ms: Date.now() - t0 });
+    }
+    item.preBody = body;        // null = 原图直通; ArrayBuffer = 混淆体
+    item.preAct = act;
+    item.preDone = true;        // 编码结论已出 (原图也是结论, 别让超时路径再跑一遍)
+    return body;
   }
 
   function dropStale() {
@@ -304,6 +326,31 @@
       log({ ev: 'upload-pass', why: 'register-timeout-no-bytes' });
       item.state = 'sent';
       try { origSend.call(item.xhr, item.sendBody); } catch (e2) {}
+      return;
+    }
+
+    /* 预编码产物直接用 —— 按发送那一刻零编码延迟 (双回车根治的核心保证)。
+     * preAct 里的结论就是放行结论 (翻转已把 preBody 重编成最新)。 */
+    if (item.preAct) {
+      const body0 = item.preBody, act0 = item.preAct;
+      /* 放行前终检 (aborted) 同样适用 */
+      if (item.state === 'aborted' || (item.xhr && item.xhr.__moeAbort)) {
+        item.state = 'aborted';
+        rec({ ev: 'release-abort', id: item.id, trigger });
+        return;
+      }
+      item.state = 'sent';
+      rec({ ev: 'release', id: item.id, trigger, as: body0 ? '混淆图' : '原图', why: act0.source, bytes: body0 ? body0.byteLength : item.u8.length, pre: true });
+      log({ ev: 'upload-replaced', obf: !!body0, as: body0 ? '混淆图' : '原图',
+            kb: ((body0 ? body0.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB',
+            info: (body0 ? '混淆图' : '原图') + ' · 预编码' });
+      item.done = new Promise((res) => {
+        const x = item.xhr;
+        const fin = () => { try { x.removeEventListener('loadend', fin); x.removeEventListener('error', fin); } catch (e) {} res(); };
+        try { x.addEventListener('loadend', fin); x.addEventListener('error', fin); } catch (e) { res(); return; }
+        setTimeout(fin, 10000);
+      });
+      try { origSend.call(item.xhr, body0 || item.sendBody); } catch (e) { rec({ ev: 'release-send-err', id: item.id, err: String(e && e.message || e) }); }
       return;
     }
 
@@ -431,19 +478,36 @@
       return /^(send message|send|发送消息|發送訊息|发送)$/i.test(label);
     } catch (e) { return false; }
   }
+  /* 输入框判定: Enter 的 target 必须是聊天输入框 (contenteditable / textarea)。
+   * 搜索框 (role=combobox) 等不算。 */
+  function inComposer(el) {
+    try {
+      if (!el || !el.closest) return false;
+      return !!el.closest('[contenteditable="true"][role="textbox"], textarea, [class*="slateTextArea"]');
+    } catch (e) { return false; }
+  }
   function pendingUploads() {
     return held.some((h) => h.state === 'held' || h.state === 'registering');
   }
   function onSendIntent(why) {
-    /* 仅作兜底: 极快手速下 POST /messages 先于登记完成时, 把还没放行的项立即放掉。
-     * 不阻塞 POST (直接放行上传, 宿主自己等)。正常情况下 immediate-release 后
-     * 这里 pending 为空, 什么都不做。 */
+    /* 发送意图 = 放行挂着的 PUT (预编码 body, 零延迟)。
+     * 不扣键盘、不改事件 —— 只监听, 原生流程原样走。 */
     if (!pendingUploads()) return;
     rec({ ev: 'send-intent', why,
           held: held.filter((h) => h.state === 'held').length,
           registering: held.filter((h) => h.state === 'registering').length });
     return releaseAll('intent:' + why);
   }
+  document.addEventListener('keydown', (e) => {
+    try {
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+      if (!inComposer(e.target)) return;
+      onSendIntent('enter');
+    } catch (err) {}
+  }, true);
+  document.addEventListener('click', (e) => {
+    try { if (looksLikeSendButton(e.target)) onSendIntent('send-button'); } catch (err) {}
+  }, true);
 
   /* messagePosts: POST /messages 计数 (调试与 correction 判据, 不再扣键) */
   let messagePosts = 0;
@@ -594,12 +658,27 @@
           settleReg(placeholder);
           rec({ ev: 'hold', id: placeholder.id, fp: fpShort(fp), ck: ck.slice(0, 12), bytes: u8.length, mime: realMime, heldTotal: held.length });
           log({ ev: 'tracked', name: 'upload', size: u8.length, type: realMime });
-          /* 【等结论再放行】给评分/手动 ✕/○ 一个短窗口 (DECISION_WAIT_MS):
-           *   - 这张图自己的结论 (ck/fp 命中 decisions) 一到 → 立刻编码放行
-           *   - 手动翻转开关 → 上面 decisions-sync 钩子立刻按新结论放行
-           *   - 超时没结论 → 按现场审查放行 (不再等)
-           * 窗口上限 3s, 绝不无限挂 —— 双回车根治不动摇。 */
-          waitDecisionThenRelease(placeholder);
+          /* 【预编码·挂起】结论一到就先编码 (不放行, PUT 挂着);
+           * 3s 没结论 → 现场审查编一版占位 (开关翻动会重编)。
+           * 放行只由 send-intent / 45s TTL / abort 触发。 */
+          preencode(placeholder);
+          setTimeout(() => {
+            if (placeholder.state === 'held' && !placeholder.preDone && !placeholder.encoding) {
+              /* 没结论 → 现场审查一版编好, 占位等发送 */
+              (async () => {
+                try {
+                  const Review = window.__MoeGuardReview;
+                  const img = await FMT.blobToImageData(new Blob([placeholder.u8], { type: placeholder.mime }));
+                  const act = Review
+                    ? await Review.resolveAction(img, placeholder.ck ? [] : decisions, cfg, { tag: Core.perceptualTag, tagMatches: Core.tagMatches, remoteFn: remoteScore })
+                        .catch(() => ({ obfuscate: true, score: 1, source: 'fallback' }))
+                    : { obfuscate: true, score: 1, source: 'no-review' };
+                  await encodeInto(placeholder, act);
+                  rec({ ev: 'pre-encode', id: placeholder.id, as: act.obfuscate ? '混淆图' : '原图', source: 'timeout:' + act.source });
+                } catch (e) { rec({ ev: 'pre-encode-err', id: placeholder.id, err: String(e && e.message || e) }); }
+              })();
+            }
+          }, DECISION_WAIT_MS);
         } catch (e) {
           log({ ev: 'error', msg: 'xhr-hold: ' + (e && e.message ? e.message : e) });
           try { return origSend.apply(self, args); } catch (e2) {}
@@ -721,17 +800,18 @@
       if (e.data && e.data.__moe === 1 && Array.isArray(e.data.decisions)) {
         const prev = decisions.length;
         decisions = e.data.decisions.filter((d) => d && typeof d.fp === 'string');
-        /* 手动翻转 ✕/○ 落到还没放行的 PUT 上 → 立刻按新结论编码放行
-         * (这正是「评分不够我手动 ✕」要生效的那条路)。
-         * 已放行 (CDN 字节已定) 的不追 —— 物理边界, 见历史注记。 */
+        /* 手动翻转 ✕/○ → 挂着的 PUT 【重编】新结论 (不产生流量, 放行仍在发送时)。
+         * 翻多少次都行: 每次重编都是纯本地, 发出去的一定是最后一次的结论。 */
         const flip = e.data.manualFlip;
         if (flip && (flip.ck || flip.fp)) {
           for (const h of held) {
             if (h.state !== 'held') continue;
-            if (flip.ck && h.ck === flip.ck) { releaseOne(h, 'manual-flip').catch(() => {}); continue; }
-            if (!flip.ck && flip.fp && h.fp && Core.tagMatches && Core.tagMatches(h.fp, flip.fp)) {
-              releaseOne(h, 'manual-flip').catch(() => {});
-            }
+            const hit = (flip.ck && h.ck === flip.ck) ||
+                        (!flip.ck && flip.fp && h.fp && Core.tagMatches && Core.tagMatches(h.fp, flip.fp));
+            if (!hit) continue;
+            h.preBody = null; h.preAct = null;      // 旧编码作废
+            preencode(h);
+            rec({ ev: 'flip-reencode', id: h.id });
           }
         }
         rec({

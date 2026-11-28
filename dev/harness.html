@@ -279,16 +279,20 @@
   x.open('PUT', 'https://discord-attachments-uploads-prd.storage.googleapis.com/upload/storage/v1/b/x/o?uploadType=media');
   x.setRequestHeader('content-type', 'image/webp');
   x.send(pngBytes.buffer);
-  await sleep(3600);          // 决策窗口 (3s) 过后自动放行
-  /* 2026-11-28 模型反转: 不再「挂住等按键」, 而是【入队即编码立即放行】——
-   * 断言反过来: 无需任何按键, PUT 已自动放行且字节已换 (零流量断言废止)。 */
+  await sleep(3600);          // 超时预编码完成, 但 PUT 挂着不放
+  const heldZero = window.__net.requests.filter(r => String(r.url || '').includes('/b/x/')).length === 0;
+  ok('PUT 挂着不放 (按发送前零流量)', heldZero, '已发 ' + window.__net.requests.length + ' 笔');
+  /* 挂起模型 (2026-11-28 二次反转): PUT 挂到发送意图 (Enter/按钮) 才放行,
+   * 预编码让放行零延迟 —— 开关 ✕/○ 翻到发送前都算数。 */
+  document.getElementById('composer').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(1500);
   const autoReq = window.__net.requests.find((r) => String(r.url || '').includes('/b/x/'));
-  ok('上传自动放行 (无需按键, immediate-release)', !!autoReq && !!autoReq.bytes && autoReq.bytes.length > 0,
-     autoReq ? '已自动放行 ' + autoReq.bytes.length + 'B' : '未放行');
+  ok('按 Enter → 挂着的 PUT 立刻放行', !!autoReq && !!autoReq.bytes && autoReq.bytes.length > 0,
+     autoReq ? '已放行 ' + autoReq.bytes.length + 'B' : '未放行');
   const moeMarked = autoReq && autoReq.bytes && (function(){ const b = autoReq.bytes;
     for (let i = 8; i < Math.min(b.length, 200) - 4; i++) {
       if (b[i] === 0x6d && b[i+1] === 0x6f && b[i+2] === 0x45 && b[i+3] === 0x67) return true; } return false; })();
-  ok('自动放行的体走混淆管线 (带 moEg)', !!moeMarked, autoReq ? autoReq.kind + ' ' + (autoReq.bytes ? autoReq.bytes.length + 'B' : '0B') : '-');
+  ok('放行的体走混淆管线 (带 moEg)', !!moeMarked, autoReq ? autoReq.kind + ' ' + (autoReq.bytes ? autoReq.bytes.length + 'B' : '0B') : '-');
 
   /* ---------- 4.5 快发竞态: send 与 Enter 同 tick, 不给登记窗口 ---------- */
   const y = new XMLHttpRequest();

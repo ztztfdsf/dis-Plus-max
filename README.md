@@ -41,7 +41,8 @@ Discord 官方一更新就可能失效。装之前先备份应用数据，装错
 - 只处理 PNG 和 JPEG，单张上限 32 MiB
 - 动图（GIF / 动态 WebP）不处理，原样发出去
 - 混淆后体积会变大，图片尺寸会补到分块边界，可能比原图大一圈
-- 对方的 Discord 需要装同版本插件才能看到原图；版本差太多可能解不出来
+- **已发布的所有版本互相都能解**，不要求两个人装同一版（3.6.3 / 3.7.11 / 3.7.17 / 3.8.2 两两互转 16/16，逐像素一致）
+- 唯一影响互通的是设置里的「盐值」：留空 = 全员互通；谁填了自定义盐，对面必须填一样才能解
 - 网页端用的是"先扣住上传、按发送时再放行"的做法，所以你选图后预览卡的进度条会停在 0%，按发送才开始传。这是正常的，不是卡死
 
 ## 风险
@@ -58,6 +59,7 @@ node build.js            # Chrome / Edge / Firefox 三个 zip + 解压目录
 node build-user.js       # 油猴单文件 dist/moeguard.user.js
 node build-equicord.js   # Equicord 插件包
 node dev/audit-6.js <android.apks> <输出目录>   # 六个产物的一致性审查
+node dev/xver-matrix.js <core.js> <core.js>   # 跨版本互通矩阵（旧版本 core 从旧 zip 里取）
 node tests/core.test.js         # 混淆算法单测
 node tests/send-intent.test.js  # 发送/双回车回归
 node tests/upload-lifecycle.test.cjs  # 上传放行与失败回退

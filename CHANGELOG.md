@@ -25,6 +25,10 @@ Firefox 用非持久 event page），油猴版则是同一份内核换成 `GM_*`
   `UploadHandler.promptToUpload(files, channel, DraftType.ChannelMessage)`、
   `renderMessageAccessory` 三处都与官方插件示例一致；`engine.mjs` 由 `src/core.js` 直接生成，不维护第二份编解码代码。
 - **回归**：核心算法 64/64、发送意图 8/8、上传生命周期 12/12、Equicord 真实 Chrome 绘制 21/21、六产物一致性审查 36/36。
+- **跨版本互通（实测，不是推测）**：拿 3.6.3 / 3.7.11 / 3.7.17 / 3.8.2 四个已发布版本的 `src/core.js`
+  两两互转，**16/16 逐像素一致**，格式版本一直是 MOE v3（`VERSION = '3.0.0'`）。
+  唯一的互通条件是设置里的「盐值」：默认留空则全员互解；填了自定义盐就必须两边一致。
+  工具：`node dev/xver-matrix.js <core.js> <core.js>`。
 - **已知限制**：评分默认只混淆高敏感图（可在设置里改成全混或全不混）；
   网页端的进度条在按发送前会停在 0%，这是「按住上传」的必然表现。
 

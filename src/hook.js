@@ -183,7 +183,8 @@
   const rawFetch = window.fetch ? window.fetch.bind(window) : null;
 
   /* ═══════════════════════════════════════════════════════════════
-   * 【挂起上传】—— 盖住上传通道, 只在按发送键时才真正传
+   * 【入队即编码·立即放行】—— 2026-11-28 根治双回车后的模型: 字节一登记完立刻按当时结论编码并放行 PUT, 进度条正常走, 按发送时一次回车原生发送; 键盘/按钮完全不碰。以下历史注记保留 (为什么不能事后覆盖/反复重传)
+   * 旧模型(挂起等发送)的死因
    * ═══════════════════════════════════════════════════════════════
    * 为什么必须这样 (走过的两条死路):
    *   1. 拖入即传 + 事后覆盖签名 URL: PUT 返回 200 但 CDN 字节仍是原图
@@ -194,14 +195,9 @@
    *   (预览卡上那个进度条就是它); 按发送只发一条引用已上传文件的消息。
    *   所以用户点 ✕/○ 必然晚于上传 —— 这是时序上的物理矛盾。
    *
-   * 解法: 把 PUT 挂住不发, 只记进队列;
-   *   等到用户按【发送】(Enter / 发送按钮) 那一刻,
-   *   按【当时的结论】编码, 依次放行 PUT。
-   *   → 用户怎么切开关都不产生网络流量, 发出去的一定是最终结论。
-   *   ⚠️ 不能等 POST /messages: Discord 会等上传完成才发消息 → 死锁 (详见下方)。
-   *
-   * UI 影响: 预览卡的进度条会一直转到按发送为止 —— 这是预期的,
-   *   因为图确实还没传。Discord 不会因此报错 (它只等 XHR 完成)。
+   * 旧解法 (已废弃): PUT 挂住, 按发送才编码放行 —— 附件 0% 时宿主丢发送意图,
+   *   必然双回车; 3.8.2 扣键+补发合成回车也被证实无效 (isTrusted=false 被丢弃)。
+   *   开关后改: decisions 更新钩子按新结论 correction 重传, PUT 从不长期挂起。
    *
    * 兜底: 删除预览图/切频道会调 xhr.abort() → 队列项标记 aborted 并丢弃;
    *   HOLD_TTL 之后自动放行, 避免因为某种未知路径而永久悬空。
@@ -264,7 +260,7 @@
   async function releaseOne(item, trigger) {
     const idx = held.indexOf(item);
     if (idx >= 0) held.splice(idx, 1);
-    if (item.state !== 'held') { rec({ ev: 'release-skip', id: item.id, state: item.state }); return; }
+    if (item.state !== 'held') { rec({ ev: 'release-skip', id: item.id, state: item.state, trigger }); return; }
     item.state = 'releasing';
 
     /* 登记超时的占位项: 拿不到字节无从评分/混淆 → 原样放行 (失败必须外显) */
@@ -329,6 +325,14 @@
       log({ ev: 'error', msg: 'release: ' + (e && e.message ? e.message : e) });
     }
 
+    /* 【放行前终检】编码期间用户可能删预览/切频道 (state→aborted):
+     * 这时绝不能再 PUT —— 上传了一半的取消才是真取消。
+     * (放在 state='sent' 之前, 否则会被覆盖成 sent) */
+    if (item.state === 'aborted' || (item.xhr && item.xhr.__moeAbort)) {
+      item.state = 'aborted';
+      rec({ ev: 'release-abort', id: item.id, trigger });
+      return;
+    }
     item.state = 'sent';
     rec({ ev: 'release', id: item.id, trigger, as: label, why, bytes: body ? body.byteLength : item.u8.length });
     /* 【obf 必须带上】不然隔离世界不知道这笔到底换没换,
@@ -336,8 +340,7 @@
     log({ ev: 'upload-replaced', obf: !!body, as: label,
           kb: ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB',
           info: label + ' · ' + ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB' });
-    /* 上传结束信号: deferSubmit 要等这一笔真正落地, 才能决定是否需要补发发送动作。
-     * 没有它就只能靠猜时间, 猜早了会把消息发两遍, 猜晚了用户又要点第二下。 */
+    /* 上传结束信号: correction 重传与兜底放行要用「这一笔真正落地」的时机。 */
     item.done = new Promise((res) => {
       const x = item.xhr;
       const fin = () => { try { x.removeEventListener('loadend', fin); x.removeEventListener('error', fin); } catch (e) {} res(); };
@@ -351,8 +354,7 @@
     }
   }
 
-  /** 用户按发送 → 放行所有挂起的 PUT (按当时结论), 全部完成后再发消息
-   *  返回的 Promise 在上传【真正结束】(loadend) 后落地 —— 双回车修复靠这个时序。 */
+  /** 兜底放行: 极快发送(TTL/POST 先于登记)时把还没放行的 PUT 一次性放掉。 */
   function releaseAll(trigger) {
     dropStale();
     /* 先等正在登记中的占位项落地 (拖入快+发送快的窗口), 否则这些图会被漏掉 */
@@ -378,11 +380,6 @@
    *   3. POST /messages (万一存在就也算, 无害)
    * 放行后 PUT 正常跑完, Discord 看到上传完成就把消息发出去。
    * ═══════════════════════════════════════════════════════════════ */
-  function inComposer(el) {
-    try {
-      return !!(el && el.closest && el.closest('[class*="channelTextArea"], [class*="slateTextArea"], [class*="form"], [role="textbox"]'));
-    } catch (e) { return false; }
-  }
   function looksLikeSendButton(el) {
     try {
       if (!el || !el.closest) return false;
@@ -403,7 +400,9 @@
     return held.some((h) => h.state === 'held' || h.state === 'registering');
   }
   function onSendIntent(why) {
-    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */
+    /* 仅作兜底: 极快手速下 POST /messages 先于登记完成时, 把还没放行的项立即放掉。
+     * 不阻塞 POST (直接放行上传, 宿主自己等)。正常情况下 immediate-release 后
+     * 这里 pending 为空, 什么都不做。 */
     if (!pendingUploads()) return;
     rec({ ev: 'send-intent', why,
           held: held.filter((h) => h.state === 'held').length,
@@ -411,78 +410,9 @@
     return releaseAll('intent:' + why);
   }
 
-  /* ═══════════════════════════════════════════════════════════════
-   * 双回车修复 —— 为什么有时候要按两下
-   * ═══════════════════════════════════════════════════════════════
-   * 现象: 附件还挂在我们手里(进度条 0%)时按 Enter, 第一次不发, 第二次才发。
-   *
-   * 原因(实测): Discord 的提交在【附件还没传完】时直接返回、不记住这次发送意图。
-   *   我们听到 Enter 才放行上传 → 上传从 0 开始 → Discord 那一侧看到的仍是
-   *   「附件未就绪」→ 那次 Enter 被吞掉; 等上传真正完成, 已经没人替它提交了。
-   *   宿主若恰好会排队, 就一次够 —— 这就是「有时候」的来源。
-   *
-   * 修法(不改别的行为): 附件未就绪时, 把这次发送动作【扣下】不交给 Discord,
-   *   先放行上传并等它真正结束, 再补发一次同样的动作。
-   *   → 用户按一次, 只发一条; 上传期间 Discord 根本没收到过那次提交, 不会重复发。
-   * ⚠️ 只有当 hold 里确实有东西时才扣; 没附件时完全原生, 一个字都不碰。
-   * ⚠️ 放行期间若 Discord 自己已经发了消息(POST /messages 出现), 绝不补发。
-   * ═══════════════════════════════════════════════════════════════ */
-  let messagePosts = 0;          // POST /messages 计数 (判断宿主是否已自行提交)
-  let deferred = null;           // {kind, target, ev, at} 正在扣住的那一次发送动作
-  const synthetic = new WeakSet();
+  /* messagePosts: POST /messages 计数 (调试与 correction 判据, 不再扣键) */
+  let messagePosts = 0;
 
-  function replay(kind, target) {
-    try {
-      if (kind === 'enter') {
-        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
-          bubbles: true, cancelable: true, composed: true });
-        synthetic.add(ev);
-        target.dispatchEvent(ev);
-      } else if (kind === 'click') {
-        const btn = target.closest ? (target.closest('button, [role="button"]') || target) : target;
-        btn.click();
-      }
-    } catch (e) { rec({ ev: 'replay-err', err: String(e && e.message || e) }); }
-  }
-
-  function deferSubmit(kind, target, ev) {
-    if (!pendingUploads()) return false;      // 没挂起上传 → 原生照常, 不动
-    if (deferred) {                           // 已在等上传: 这一次也不交出去
-      try { ev.preventDefault(); ev.stopImmediatePropagation(); } catch (e) {}
-      return true;
-    }
-    try { ev.preventDefault(); ev.stopImmediatePropagation(); } catch (e) {}
-    const before = messagePosts;
-    deferred = { kind, target, at: Date.now() };
-    rec({ ev: 'defer-submit', kind, held: held.length });
-    const release = onSendIntent(kind === 'enter' ? 'enter' : 'send-button') || Promise.resolve();
-    release.then(() => new Promise((r) => setTimeout(r, 350))).then(() => {
-      const d = deferred; deferred = null;
-      if (!d) return;
-      /* 宿主要是已经替我们把消息发出去了, 就什么都不做 —— 否则会发两遍 */
-      if (messagePosts > before) { rec({ ev: 'defer-host-sent', kind }); return; }
-      /* 草稿已被清空 / 目标已不在文档里 → 不补发, 避免发空消息 */
-      if (!d.target || (d.target.isConnected === false)) { rec({ ev: 'defer-target-gone', kind }); return; }
-      rec({ ev: 'defer-replay', kind, waitedMs: Date.now() - d.at });
-      replay(d.kind, d.target);
-    }).catch((e) => { deferred = null; rec({ ev: 'defer-err', err: String(e && e.message || e) }); });
-    return true;
-  }
-
-  document.addEventListener('keydown', (e) => {
-    try {
-      if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
-      if (!inComposer(e.target)) return;
-      if (synthetic.has(e)) return;            // 我们自己补发的那一次, 放行
-      deferSubmit('enter', e.target, e);
-    } catch (err) {}
-  }, true);
-  document.addEventListener('click', (e) => {
-    try {
-      if (!looksLikeSendButton(e.target)) return;
-      deferSubmit('click', e.target, e);
-    } catch (err) {}
-  }, true);
 
 
   /* ---------- 核心: 字节 → (审查通过则) 混淆后的 PNG Blob ----------
@@ -573,11 +503,14 @@
   XHRProto.abort = function () {
     try {
       const it = this.__moeHeld;
-      if (it && it.state === 'held') {
+      /* registering 也要一并作废 —— 立即放行模型下登记窗口很短,
+       * 但用户删预览图正发生在这窗口里时, 字节就绪后绝不能再 PUT。 */
+      if (it && (it.state === 'held' || it.state === 'registering' || it.state === 'releasing')) {
         it.state = 'aborted';
         const i = held.indexOf(it);
         if (i >= 0) held.splice(i, 1);
-        rec({ ev: 'hold-abort', id: it.id, fp: fpShort(it.fp) });
+        settleReg(it);
+        rec({ ev: 'hold-abort', id: it.id, state: it.state, fp: fpShort(it.fp) });
       }
     } catch (e) {}
     return origAbort.apply(this, arguments);
@@ -586,9 +519,7 @@
   XHRProto.send = function (body) {
     const self = this;
     try {
-      /* POST /messages 也当作发送信号 (万一存在就多一道保险)
-       * 但【不能阻塞它】—— Discord 会等上传完成才发消息, 互等就死锁了。
-       * 真正的放行靠上面的 keydown/click 监听 (那些在上传之前就触发)。 */
+      /* POST /messages: 只计数 + 兜底放行尚未处理的项 (不阻塞) */
       if (cfg.enabled && isMessagePost(this.__moeMethod, this.__moeUrl)) {
         messagePosts++;
         onSendIntent('post-messages');
@@ -598,12 +529,8 @@
       }
       log({ ev: 'upload-seen', url: String(this.__moeUrl).slice(0, 90) });
 
-      /* 【挂住上传】不立刻发 —— 只记进队列, 等按发送键才按当时结论编码并放行。
-       * 这样用户切多少次开关都不产生流量, 发出去的一定是最终结论。
-       * 命中上传 URL 的同一时刻先同步占位 (registering),
-       * 防止「send 返回 → 字节登记完成」之间按发送把这笔 PUT 漏掉。 */
+      /* 同步占位 (registering), 字节一就绪 → 立即编码放行 (immediate-release)。 */
       const args = arguments;
-      const self = this;
       const placeholder = registerPlaceholder(self, body);
       bodyToU8(body).then(async (u8) => {
         try {
@@ -627,11 +554,13 @@
           placeholder.mime = realMime;
           placeholder.fp = fp;
           placeholder.ck = ck;
+          if (placeholder.state === 'aborted') return;   // 登记期被 abort
           placeholder.state = 'held';
           settleReg(placeholder);
           rec({ ev: 'hold', id: placeholder.id, fp: fpShort(fp), ck: ck.slice(0, 12), bytes: u8.length, mime: realMime, heldTotal: held.length });
           log({ ev: 'tracked', name: 'upload', size: u8.length, type: realMime });
-          // 不调 origSend —— 等 releaseAll
+          /* 【入队即放行】字节一就绪立刻按当时结论编码并 PUT —— 双回车根治点 */
+          releaseOne(placeholder, 'immediate').catch(() => {});
         } catch (e) {
           log({ ev: 'error', msg: 'xhr-hold: ' + (e && e.message ? e.message : e) });
           try { return origSend.apply(self, args); } catch (e2) {}
@@ -753,8 +682,10 @@
       if (e.data && e.data.__moe === 1 && Array.isArray(e.data.decisions)) {
         const prev = decisions.length;
         decisions = e.data.decisions.filter((d) => d && typeof d.fp === 'string');
-        // 不在这里放行上传 —— 用户反复切开关不应产生流量。
-        // 放行时机在【发送动作】(Enter / 发送按钮)。
+        /* 立即放行模型下, decisions 通常在 PUT 之前就到 (预览即时)。
+         * 若用户在放行后才翻转开关: 已上传字节无法原地改写 (GCS 签名 URL
+         * 事后覆盖实测无效, 见历史注记) —— 该图的结论以放行那一刻为准,
+         * 需要改就删掉预览图重新拖入。这是物理边界, 不硬造。 */
         rec({
           ev: 'decisions-sync', was: prev, now: decisions.length,
           list: decisions.map((d) => ({ fp: fpShort(d.fp), ck: (d.ck || '').slice(0, 12), obf: !!d.obfuscate, man: !!d.manual })),

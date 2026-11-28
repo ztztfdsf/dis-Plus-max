@@ -696,6 +696,10 @@
     btn.style.fontSize = '13px';
     btn.style.fontWeight = '700';
     btn.style.lineHeight = '1';
+    /* 【mousedown 就拦】点开关那一刻别让焦点从输入框抢走 (preventDefault
+     * 掉 mousedown = 浏览器不给按钮聚焦, 输入框光标原地不动);
+     * click 里的焦点归还作兜底。 */
+    btn.addEventListener('mousedown', (e) => { e.preventDefault(); }, true);
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -704,6 +708,13 @@
       setDecision(fp, { ck: img.dataset.moeCk || '', obfuscate: next, manual: true });
       renderDecision(img, fp);
       toast(next ? '已改为混淆这张图' : '已取消这张图的混淆 (原图发送)');
+      /* 【焦点不丢】点开关会抢走输入框焦点, 用户改完还得手动点回输入框
+       * 才能回车发送 —— 直接把焦点还给最近聚焦的 composer (焦点本来就是
+       * 在那, 归还是零副作用)。 */
+      try {
+        const el = (typeof composerEl === 'function') ? composerEl() : null;
+        if (el && document.activeElement !== el && el.isConnected) el.focus();
+      } catch (err) {}
     }, true);
 
     pill.append(chip, btn);

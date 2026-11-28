@@ -127,26 +127,27 @@ test('纯文本：一次 Enter 就是一次 POST，附件路径不参与', async
   assert.deepEqual(f.sends, ['POST']);
 });
 
-test('有挂起附件时按一次 Enter：等上传结束后补发一次，总共只发一条', async () => {
+test('有附件时: 上传自动完成后一次 Enter 就发出去 (immediate-release, 不扣键)', async () => {
   const f = fixture({ hostQueues: false });
   f.attach();
-  f.enter();                       // 被扣住
-  await tick(20);
-  assert.equal(f.posts, 0, '上传没结束时不该已提交');
-  f.ackAll();                      // 上传真正结束
-  await settle();
-  assert.equal(f.posts, 1, '补发后应当正好一条消息');
-  assert.ok(f.log.some(e => e.ev === 'defer-replay'), '应当记录补发动作');
+  await settle();                  // 字节登记 + 立即编码 + PUT 自动跑完
+  assert.ok(f.pendingCount > 0, 'PUT 应已自动放行');
+  f.ackAll();                      // 上传 loadend
+  await tick(10);
+  f.enter();                       // 上传已完成 → 原生直达, 一次就够
+  assert.equal(f.posts, 1, '一次回车一条消息');
+  const e = f.log.filter(x => x.ev === 'release' || x.ev === 'release-decide');
+  assert.ok(e.length >= 1, '放行有记录');
 });
 
-test('即使宿主本来会排队：也仍然只发一条（扣住的回车它根本没收到）', async () => {
+test('宿主会排队时: 上传完成后按一次也只发一条', async () => {
   const f = fixture({ hostQueues: true });
   f.attach();
-  f.enter();
-  await tick(20);
-  f.ackAll();
   await settle();
-  assert.equal(f.posts, 1, '扣住+补发的结果必须正好一条');
+  f.ackAll();
+  await tick(10);
+  f.enter();
+  assert.equal(f.posts, 1, '必须正好一条');
 });
 
 test('没有挂起附件时完全不碰回车（原生行为）', async () => {
@@ -156,7 +157,7 @@ test('没有挂起附件时完全不碰回车（原生行为）', async () => {
   assert.equal(f.posts, 1);
 });
 
-test('连续按两次：仍只发一条', async () => {
+test('连续按两次：仍只发一条 (键盘没被扣, 第二次时草稿已空)', async () => {
   const f = fixture();
   f.attach();
   f.enter(); f.enter();            // 第二下在等待期
@@ -177,7 +178,7 @@ test('Shift+Enter 与输入法确认都不触发放行，也不提交', async ()
   assert.ok(!f.log.some(e => e.ev === 'defer-submit'), '不该被当成发送');
 });
 
-test('发送按钮走同一条补发路径', async () => {
+test('发送按钮: 上传完成后点击一次即发', async () => {
   const f = fixture();
   f.attach();
   f.clickSend();
@@ -187,7 +188,7 @@ test('发送按钮走同一条补发路径', async () => {
   assert.equal(f.posts, 1);
 });
 
-test('等待期间清空草稿：补发时不发空消息', async () => {
+test('等待期间清空草稿：按发送不发空消息', async () => {
   const f = fixture();
   f.attach();
   f.enter();

@@ -18,7 +18,7 @@ const settle = async () => { for (let i = 0; i < 10; i++) await tick(50); };
 const PNG = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
   0, 0, 0, 2, 0, 0, 0, 2, 8, 2, 0, 0, 0);
 
-function fixture(code, { encodeThrows = false, alreadyMoe = false } = {}) {
+function fixture(code, { encodeThrows = false, alreadyMoe = false, slowEncode = false } = {}) {
   const docListeners = {}, sends = [], pending = [];
   let encodeCalls = 0, aborted = 0;
   class Xhr extends EventTarget {
@@ -34,11 +34,16 @@ function fixture(code, { encodeThrows = false, alreadyMoe = false } = {}) {
     __MoeGuardCore: {
       contentKey: () => 'ck', perceptualTag: () => 'tag', tagMatches: () => false,
       detectMeta: () => alreadyMoe,
-      encodeImage: () => { encodeCalls++; if (encodeThrows) throw Error('encoder refused'); return { width: 2, height: 2 }; },
+      encodeImage: async () => {
+        encodeCalls++;
+        if (slowEncode) await tick(200);
+        if (encodeThrows) throw Error('encoder refused');
+        return { width: 2, height: 2 };
+      },
     },
     _moeFormat: {
       blobToImageData: async () => ({ width: 2, height: 2, data: new Uint8ClampedArray(16) }),
-      resizeImageData: b => b, encodedToBlob: async () => new Blob([new Uint8Array([1, 2, 3, 4])]),
+      resizeImageData: b => b, encodedToBlob: async (enc) => { await enc; return new Blob([new Uint8Array([1, 2, 3, 4])]); },
     },
   };
   const document = { addEventListener(k, cb) { (docListeners[k] ||= []).push(cb); } };
@@ -69,13 +74,13 @@ function fixture(code, { encodeThrows = false, alreadyMoe = false } = {}) {
 }
 
 for (const [name, code] of Object.entries(variants)) {
-  test(name + ': 上传被挂住，按键前不产生 PUT 字节', async () => {
+  test(name + ': 字节就绪即自动放行 PUT (immediate-release, 无需按键)', async () => {
     const f = fixture(code);
     f.upload();
     await tick(30);
-    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 0, '按键前不得真的上传');
-    f.press(); await tick(30);
-    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1);
+    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '无需按键就应放行');
+    f.press();
+    assert.equal(f.sends.filter(s => s.method === 'PUT').length, 1, '按键不产生第二笔 PUT');
   });
 
   test(name + ': 编码失败 → 仍按原图放行（不阻断、不弹窗、不丢附件）', async () => {
@@ -118,12 +123,11 @@ for (const [name, code] of Object.entries(variants)) {
     assert.equal(f.encodeCalls, 0);
   });
 
-  test(name + ': 取消附件（abort）后不再放行上传', async () => {
-    const f = fixture(code);
+  test(name + ': 登记期取消（abort 先于编码完成）→ 不上传', async () => {
+    const f = fixture(code, { slowEncode: true });
     const x = f.upload();
-    await tick(30);
+    await tick(5);          // registering 窗口内 abort
     x.abort();
-    f.press();
     await settle();
     assert.equal(f.sends.filter(s => s.method === 'PUT').length, 0, '已取消的附件不该被上传');
   });

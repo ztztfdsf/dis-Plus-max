@@ -138,8 +138,11 @@ function patchHookGuard(src) {
  */
 function patchHookLogic(src) {
   /* ① 记住发送意图时刻 */
-  const A1 = '  function onSendIntent(why) {\n    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n    if (!pendingUploads()) return;';
-  must(src, A1, 'hook onSendIntent');
+  const A1 = '  function onSendIntent(why) {\n'
+    + '    /* 仅作兜底: 极快手速下 POST /messages 先于登记完成时, 把还没放行的项立即放掉。\n'
+    + '     * 不阻塞 POST (直接放行上传, 宿主自己等)。正常情况下 immediate-release 后\n'
+    + '     * 这里 pending 为空, 什么都不做。 */\n'
+    + '    if (!pendingUploads()) return;';
   src = src.replace(A1,
     '  let lastIntentAt = 0;   // 【油猴补丁①】最近一次【用户亲手】发送意图, 供「意图早于入队」补课\n'
     + '  function onSendIntent(why) {\n'
@@ -147,10 +150,10 @@ function patchHookLogic(src) {
     + '     * 但它在发完消息之后才到 —— 记进去会让「发完上一条 → 3s 内拖新图」误判成\n'
     + '     * 「这张图也要立刻发」, 提前把图 PUT 上去。 */\n'
     + '    if (why === \'enter\' || why === \'send-button\') lastIntentAt = Date.now();\n'
-    + '    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n'
+    + '    /* 仅作兜底: 常态下 immediate-release 后 pending 为空。 */\n'
     + '    if (!pendingUploads()) return;');
 
-  /* ② abort 置标志 (预处理期也能看见) */
+/* ② abort 置标志 (预处理期也能看见) */
   const A2 = '  XHRProto.abort = function () {\n    try {\n      const it = this.__moeHeld;';
   must(src, A2, 'hook abort');
   src = src.replace(A2,
@@ -166,8 +169,13 @@ function patchHookLogic(src) {
     + '          if (self.__moeAbort) { placeholder.state = \'aborted\'; settleReg(placeholder); rec({ ev: \'hold-abort-pre\', ck: (ck || \'\').slice(0, 12) }); return; }\n'
     + '          /* 字节/指纹就绪 → 原地升级占位项 (不新建, 保持引用不变) */');
 
-  const A4 = '          placeholder.u8 = u8;\n          placeholder.mime = realMime;\n          placeholder.fp = fp;\n          placeholder.ck = ck;\n          placeholder.state = \'held\';\n          settleReg(placeholder);';
-  must(src, A4, 'hook 入队 push');
+  const A4 = '          placeholder.u8 = u8;\n'
+    + '          placeholder.mime = realMime;\n'
+    + '          placeholder.fp = fp;\n'
+    + '          placeholder.ck = ck;\n'
+    + '          if (placeholder.state === \'aborted\') return;   // 登记期被 abort\n'
+    + '          placeholder.state = \'held\';\n'
+    + '          settleReg(placeholder);';
   src = src.replace(A4,
     '          placeholder.u8 = u8;\n'
     + '          placeholder.mime = realMime;\n'

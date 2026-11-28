@@ -791,29 +791,28 @@ function pngAddMarker(u8, meta) {
   return out;
 }
 
-/** 从开头几十字节读标记块 → {B,w,h,saltOk} | null (不需完整文件) */
-function pngReadMarker(u8, salt) {
+// The PNG chunk is only a candidate hint. Decoded pixels carry the authoritative
+// format and salt; never label an attachment decoded from the header alone.
+function pngMarkerPayload(u8) {
   if (!isPng(u8) || u8.length < 33) return null;
-  let p = 8;
-  for (let guard = 0; guard < 4 && p + 8 <= u8.length; guard++) {
-    const len = (u8[p] << 24 | u8[p + 1] << 16 | u8[p + 2] << 8 | u8[p + 3]) >>> 0;
-    const type = String.fromCharCode(u8[p + 4], u8[p + 5], u8[p + 6], u8[p + 7]);
-    if (type === CHUNK_TYPE) {
-      const d = p + 8;
-      if (d + 11 > u8.length) return null;
-      if (!(u8[d] === 0x4d && u8[d + 1] === 0x4f && u8[d + 2] === 0x45 && u8[d + 3] === 0x31)) return null;
-      const tail = saltTail(salt);
-      return {
-        B: u8[d + 4] || 16,
-        w: (u8[d + 5] << 8) | u8[d + 6],
-        h: (u8[d + 7] << 8) | u8[d + 8],
-        saltOk: u8[d + 9] === tail[0] && u8[d + 10] === tail[1],
-      };
+  const v = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  for (let p = 8, guard = 0; guard < 4 && p + 12 <= u8.length; guard++) {
+    const len = v.getUint32(p), type = v.getUint32(p + 4), end = p + 8 + len;
+    if (end + 4 > u8.length || type === 0x49444154 || type === 0x49454e44) return null;
+    if (type === 0x6d6f4567) { // moEg, before IDAT
+      if (!len || len > 64 || (crc32(u8.subarray(p + 4, end)) >>> 0) !== v.getUint32(end)) return null;
+      return u8.subarray(p + 8, end);
     }
-    if (type === 'IDAT' || type === 'IEND') return null; // 标记应在像素数据之前
-    p += 12 + len;
+    p = end + 4;
   }
   return null;
+}
+function pngReadMarker(u8, salt) {
+  const d = pngMarkerPayload(u8);
+  if (!d || d.length !== 11 || d[0] !== 0x4d || d[1] !== 0x4f || d[2] !== 0x45 || d[3] !== 0x31) return null;
+  const tail = saltTail(salt);
+  return { B: d[4] || 16, w: (d[5] << 8) | d[6], h: (d[7] << 8) | d[8],
+    saltOk: d[9] === tail[0] && d[10] === tail[1] };
 }
 
 /** 感知指纹 (用于把预览阶段的结论匹配到上传字节)
@@ -983,7 +982,7 @@ const API = {
   probeMagic, detectFrame,
   makePRNG, saltTail, fnv1a, shufflePerm, hilbertOrder, v3TileSize,
   encodePngFast, encodePngStore, isPng, crc32,
-  pngAddMarker, pngReadMarker,
+  pngAddMarker, pngReadMarker, pngMarkerPayload,
   pngGetTextChunks, pngPutTextChunks, pngReadMetaChunks, pngRestoreTextChunks,
   perceptualTag, tagMatches, contentKey, fnv1aBytes,
   V3_FRAME, V3_MAX_TILE, V3_CAP_TILE,

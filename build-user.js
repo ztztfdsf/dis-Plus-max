@@ -138,7 +138,7 @@ function patchHookGuard(src) {
  */
 function patchHookLogic(src) {
   /* ① 记住发送意图时刻 */
-  const A1 = '  function onSendIntent(why) {\n    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n    if (!held.some((h) => h.state === \'held\' || h.state === \'registering\')) return;';
+  const A1 = '  function onSendIntent(why) {\n    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n    if (!pendingUploads()) return;';
   must(src, A1, 'hook onSendIntent');
   src = src.replace(A1,
     '  let lastIntentAt = 0;   // 【油猴补丁①】最近一次【用户亲手】发送意图, 供「意图早于入队」补课\n'
@@ -148,7 +148,7 @@ function patchHookLogic(src) {
     + '     * 「这张图也要立刻发」, 提前把图 PUT 上去。 */\n'
     + '    if (why === \'enter\' || why === \'send-button\') lastIntentAt = Date.now();\n'
     + '    /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */\n'
-    + '    if (!held.some((h) => h.state === \'held\' || h.state === \'registering\')) return;');
+    + '    if (!pendingUploads()) return;');
 
   /* ② abort 置标志 (预处理期也能看见) */
   const A2 = '  XHRProto.abort = function () {\n    try {\n      const it = this.__moeHeld;';

@@ -301,3 +301,5 @@ if (!want.length || want.indexOf('userscript') >= 0) {
     console.log(`    ${''.padEnd(8)} 注意: 与扩展版共存时 hook 会被安装守卫拦住(不会双双混淆), 但没必要同时开`);
   }
 }
+
+module.exports = { zipWrite };

@@ -336,6 +336,14 @@
     log({ ev: 'upload-replaced', obf: !!body, as: label,
           kb: ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB',
           info: label + ' · ' + ((body ? body.byteLength : item.u8.length) / 1024).toFixed(0) + 'KB' });
+    /* 上传结束信号: deferSubmit 要等这一笔真正落地, 才能决定是否需要补发发送动作。
+     * 没有它就只能靠猜时间, 猜早了会把消息发两遍, 猜晚了用户又要点第二下。 */
+    item.done = new Promise((res) => {
+      const x = item.xhr;
+      const fin = () => { try { x.removeEventListener('loadend', fin); x.removeEventListener('error', fin); } catch (e) {} res(); };
+      try { x.addEventListener('loadend', fin); x.addEventListener('error', fin); } catch (e) { res(); return; }
+      setTimeout(fin, 10000);
+    });
     try {
       origSend.call(item.xhr, body || item.sendBody);
     } catch (e) {
@@ -343,7 +351,8 @@
     }
   }
 
-  /** 用户按发送 → 放行所有挂起的 PUT (按当时结论), 全部完成后再发消息 */
+  /** 用户按发送 → 放行所有挂起的 PUT (按当时结论), 全部完成后再发消息
+   *  返回的 Promise 在上传【真正结束】(loadend) 后落地 —— 双回车修复靠这个时序。 */
   function releaseAll(trigger) {
     dropStale();
     /* 先等正在登记中的占位项落地 (拖入快+发送快的窗口), 否则这些图会被漏掉 */
@@ -351,7 +360,8 @@
       const items = held.filter((h) => h.state === 'held');
       rec({ ev: 'release-all', trigger, count: items.length,
             decisions: decisions.map((d) => ({ fp: fpShort(d.fp), obf: !!d.obfuscate, man: !!d.manual })) });
-      return Promise.all(items.map((it) => releaseOne(it, trigger)));
+      return Promise.all(items.map((it) => releaseOne(it, trigger)))
+        .then(() => Promise.all(items.map((it) => it.done)));
     });
   }
 
@@ -389,23 +399,89 @@
       return /^(send message|send|发送消息|發送訊息|发送)$/i.test(label);
     } catch (e) { return false; }
   }
+  function pendingUploads() {
+    return held.some((h) => h.state === 'held' || h.state === 'registering');
+  }
   function onSendIntent(why) {
     /* registering 项也算: 拖入快+发送快时字节还在登记, 不能 early-return 漏掉 */
-    if (!held.some((h) => h.state === 'held' || h.state === 'registering')) return;
+    if (!pendingUploads()) return;
     rec({ ev: 'send-intent', why,
           held: held.filter((h) => h.state === 'held').length,
           registering: held.filter((h) => h.state === 'registering').length });
-    releaseAll('intent:' + why);
+    return releaseAll('intent:' + why);
   }
+
+  /* ═══════════════════════════════════════════════════════════════
+   * 双回车修复 —— 为什么有时候要按两下
+   * ═══════════════════════════════════════════════════════════════
+   * 现象: 附件还挂在我们手里(进度条 0%)时按 Enter, 第一次不发, 第二次才发。
+   *
+   * 原因(实测): Discord 的提交在【附件还没传完】时直接返回、不记住这次发送意图。
+   *   我们听到 Enter 才放行上传 → 上传从 0 开始 → Discord 那一侧看到的仍是
+   *   「附件未就绪」→ 那次 Enter 被吞掉; 等上传真正完成, 已经没人替它提交了。
+   *   宿主若恰好会排队, 就一次够 —— 这就是「有时候」的来源。
+   *
+   * 修法(不改别的行为): 附件未就绪时, 把这次发送动作【扣下】不交给 Discord,
+   *   先放行上传并等它真正结束, 再补发一次同样的动作。
+   *   → 用户按一次, 只发一条; 上传期间 Discord 根本没收到过那次提交, 不会重复发。
+   * ⚠️ 只有当 hold 里确实有东西时才扣; 没附件时完全原生, 一个字都不碰。
+   * ⚠️ 放行期间若 Discord 自己已经发了消息(POST /messages 出现), 绝不补发。
+   * ═══════════════════════════════════════════════════════════════ */
+  let messagePosts = 0;          // POST /messages 计数 (判断宿主是否已自行提交)
+  let deferred = null;           // {kind, target, ev, at} 正在扣住的那一次发送动作
+  const synthetic = new WeakSet();
+
+  function replay(kind, target) {
+    try {
+      if (kind === 'enter') {
+        const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          bubbles: true, cancelable: true, composed: true });
+        synthetic.add(ev);
+        target.dispatchEvent(ev);
+      } else if (kind === 'click') {
+        const btn = target.closest ? (target.closest('button, [role="button"]') || target) : target;
+        btn.click();
+      }
+    } catch (e) { rec({ ev: 'replay-err', err: String(e && e.message || e) }); }
+  }
+
+  function deferSubmit(kind, target, ev) {
+    if (!pendingUploads()) return false;      // 没挂起上传 → 原生照常, 不动
+    if (deferred) {                           // 已在等上传: 这一次也不交出去
+      try { ev.preventDefault(); ev.stopImmediatePropagation(); } catch (e) {}
+      return true;
+    }
+    try { ev.preventDefault(); ev.stopImmediatePropagation(); } catch (e) {}
+    const before = messagePosts;
+    deferred = { kind, target, at: Date.now() };
+    rec({ ev: 'defer-submit', kind, held: held.length });
+    const release = onSendIntent(kind === 'enter' ? 'enter' : 'send-button') || Promise.resolve();
+    release.then(() => new Promise((r) => setTimeout(r, 350))).then(() => {
+      const d = deferred; deferred = null;
+      if (!d) return;
+      /* 宿主要是已经替我们把消息发出去了, 就什么都不做 —— 否则会发两遍 */
+      if (messagePosts > before) { rec({ ev: 'defer-host-sent', kind }); return; }
+      /* 草稿已被清空 / 目标已不在文档里 → 不补发, 避免发空消息 */
+      if (!d.target || (d.target.isConnected === false)) { rec({ ev: 'defer-target-gone', kind }); return; }
+      rec({ ev: 'defer-replay', kind, waitedMs: Date.now() - d.at });
+      replay(d.kind, d.target);
+    }).catch((e) => { deferred = null; rec({ ev: 'defer-err', err: String(e && e.message || e) }); });
+    return true;
+  }
+
   document.addEventListener('keydown', (e) => {
     try {
-      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return;
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return;
       if (!inComposer(e.target)) return;
-      onSendIntent('enter');
+      if (synthetic.has(e)) return;            // 我们自己补发的那一次, 放行
+      deferSubmit('enter', e.target, e);
     } catch (err) {}
   }, true);
   document.addEventListener('click', (e) => {
-    try { if (looksLikeSendButton(e.target)) onSendIntent('send-button'); } catch (err) {}
+    try {
+      if (!looksLikeSendButton(e.target)) return;
+      deferSubmit('click', e.target, e);
+    } catch (err) {}
   }, true);
 
 
@@ -514,6 +590,7 @@
        * 但【不能阻塞它】—— Discord 会等上传完成才发消息, 互等就死锁了。
        * 真正的放行靠上面的 keydown/click 监听 (那些在上传之前就触发)。 */
       if (cfg.enabled && isMessagePost(this.__moeMethod, this.__moeUrl)) {
+        messagePosts++;
         onSendIntent('post-messages');
       }
       if (!cfg.enabled || this.__moeMethod !== 'PUT' || !isUploadUrl(this.__moeUrl)) {
@@ -589,6 +666,7 @@
         method = (method || 'GET').toUpperCase();
         // POST /messages 也当发送信号 (不阻塞, 避免与 Discord 等上传形成死锁)
         if (cfg.enabled && isMessagePost(method, url)) {
+          messagePosts++;
           onSendIntent('post-messages/fetch');
           return nativeFetch(input, init);
         }
